@@ -172,7 +172,7 @@ func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, stat
 
 func (s *Service) runJob(ctx context.Context, job *Job) {
 	// Create a cancellable context for this job
-	ctx, cancel := context.WithCancel(ctx)
+	jobCtx, cancel := context.WithCancel(ctx)
 
 	// Set the cancel function in the job
 	job.cancelFunc = cancel
@@ -219,7 +219,7 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 	}
 
 	err = nopanic(func() error {
-		return s.runJobInner(ctx, job, gh, logs)
+		return s.runJobInner(jobCtx, job, gh, logs)
 	})
 
 	result := "success"
