@@ -34,6 +34,9 @@ on alalalalalaaaaa
 				Conditions: []DirectiveCondition{},
 			},
 		},
+		Priority:        0, // Default priority when not specified
+		Permissions:     map[string]string{},
+		PermissionRepos: []string{},
 	}
 
 	got, err := parseMeta(contents)
@@ -132,4 +135,28 @@ func TestParseDirective(t *testing.T) {
 		}
 	}
 
+}
+
+func TestParsePriority(t *testing.T) {
+	content := `#!/bin/bash
+## on push branch=main
+## priority 10
+echo "test"`
+
+	meta, err := parseMeta(content)
+	if err != nil {
+		t.Fatalf("Failed to parse meta: %v", err)
+	}
+
+	if meta.Priority != 10 {
+		t.Errorf("Expected priority 10, got %d", meta.Priority)
+	}
+
+	if len(meta.Events) != 1 {
+		t.Errorf("Expected 1 event, got %d", len(meta.Events))
+	}
+
+	if meta.Events[0].Event != "push" {
+		t.Errorf("Expected event 'push', got '%s'", meta.Events[0].Event)
+	}
 }

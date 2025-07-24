@@ -24,6 +24,76 @@ import (
 	"github.com/sqlbunny/errors"
 )
 
+// jobWorker continuously processes jobs from the queue
+func (s *Service) jobWorker() {
+	for {
+		job := s.jobQueue.Dequeue()
+
+		queuedJobs := s.jobQueue.Len()
+		s.runningJobsMutex.Lock()
+		runningJobs := len(s.runningJobs)
+		s.runningJobsMutex.Unlock()
+
+		log.Printf("Starting job %s (%s) [Priority: %d] - Queue: %d jobs, Running: %d/%d",
+			job.ID, job.Name, job.Priority, queuedJobs, runningJobs, s.config.MaxConcurrency)
+
+		s.runJob(context.Background(), job)
+
+		s.runningJobsMutex.Lock()
+		delete(s.runningJobs, job.ID)
+		s.runningJobsMutex.Unlock()
+
+		log.Printf("Finished job %s (%s)", job.ID, job.Name)
+	}
+}
+
+// enqueueJob adds a job to the queue
+func (s *Service) enqueueJob(job *Job) {
+	queuedJobs, runningJobs := s.getQueueStatus()
+	log.Printf("Enqueuing job %s (%s) [Priority: %d] - Queue: %d jobs, Running: %d/%d",
+		job.ID, job.Name, job.Priority, queuedJobs, runningJobs, s.config.MaxConcurrency)
+	s.jobQueue.Enqueue(job)
+}
+
+// getQueueStatus returns the current queue status
+func (s *Service) getQueueStatus() (queuedJobs int, runningJobs int) {
+	s.runningJobsMutex.Lock()
+	runningJobs = len(s.runningJobs)
+	s.runningJobsMutex.Unlock()
+
+	queuedJobs = s.jobQueue.Len()
+	return queuedJobs, runningJobs
+}
+
+// getDetailedQueueStatus returns detailed information about the queue
+func (s *Service) getDetailedQueueStatus() map[string]interface{} {
+	s.runningJobsMutex.Lock()
+	runningJobs := len(s.runningJobs)
+	s.runningJobsMutex.Unlock()
+
+	s.jobQueue.mutex.Lock()
+	queuedJobs := len(s.jobQueue.pq)
+
+	// Get information about queued jobs
+	queuedJobsInfo := make([]map[string]interface{}, 0, queuedJobs)
+	for _, item := range s.jobQueue.pq {
+		queuedJobsInfo = append(queuedJobsInfo, map[string]interface{}{
+			"id":       item.Job.ID,
+			"name":     item.Job.Name,
+			"priority": item.Priority,
+			"enqueued": item.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
+		})
+	}
+	s.jobQueue.mutex.Unlock()
+
+	return map[string]interface{}{
+		"queued_jobs":      queuedJobs,
+		"running_jobs":     runningJobs,
+		"max_concurrency":  s.config.MaxConcurrency,
+		"queued_jobs_info": queuedJobsInfo,
+	}
+}
+
 func (s *Service) isJobRunning(id string) bool {
 	s.runningJobsMutex.Lock()
 	_, isRunning := s.runningJobs[id]

@@ -13,13 +13,14 @@ import (
 )
 
 type Config struct {
-	DataDir     string            `yaml:"data_dir"`
-	ExternalURL string            `yaml:"external_url"`
-	ListenPort  int               `yaml:"listen_port"`
-	NetSandbox  *NetSandboxConfig `yaml:"net_sandbox"`
-	Image       string            `yaml:"image"`
-	Github      GithubConfig      `yaml:"github"`
-	Cache       CacheConfig       `yaml:"cache"`
+	DataDir        string            `yaml:"data_dir"`
+	ExternalURL    string            `yaml:"external_url"`
+	ListenPort     int               `yaml:"listen_port"`
+	MaxConcurrency int               `yaml:"max_concurrency"`
+	NetSandbox     *NetSandboxConfig `yaml:"net_sandbox"`
+	Image          string            `yaml:"image"`
+	Github         GithubConfig      `yaml:"github"`
+	Cache          CacheConfig       `yaml:"cache"`
 }
 
 type CacheConfig struct {
@@ -43,6 +44,8 @@ type Service struct {
 
 	runningJobsMutex sync.Mutex
 	runningJobs      map[string]struct{}
+
+	jobQueue *JobQueue
 
 	cgroup Cgroup
 }
@@ -72,6 +75,7 @@ type Job struct {
 	*Event
 	ID              string            `json:"id"`
 	Name            string            `json:"name"`
+	Priority        int               `json:"priority"`
 	Script          string            `json:"-"`
 	Permissions     map[string]string `json:"-"`
 	PermissionRepos []string          `json:"-"`
@@ -87,7 +91,8 @@ func main() {
 		log.Fatal(err)
 	}
 	config := Config{
-		ListenPort: 8000,
+		ListenPort:     8000,
+		MaxConcurrency: 4, // Default to 4 concurrent jobs
 		Cache: CacheConfig{
 			MinFreeSpaceMB: 20 * 1024, // 20gb
 			MaxSizeMB:      40 * 1024, // 40gb
@@ -96,6 +101,15 @@ func main() {
 	err = yaml.Unmarshal(configData, &config)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// Validate max concurrency
+	if config.MaxConcurrency <= 0 {
+		log.Printf("Invalid max_concurrency %d, using default of 4", config.MaxConcurrency)
+		config.MaxConcurrency = 4
+	}
+	if config.MaxConcurrency > 100 {
+		log.Printf("Max concurrency %d seems too high, consider reducing it", config.MaxConcurrency)
 	}
 
 	config.DataDir, err = filepath.Abs(config.DataDir)
@@ -120,7 +134,14 @@ func main() {
 		config:      config,
 		containerd:  cntd,
 		runningJobs: make(map[string]struct{}),
+		jobQueue:    NewJobQueue(),
 		cgroup:      cgroup,
+	}
+
+	// Start job queue workers
+	log.Printf("Starting job queue with max concurrency: %d", config.MaxConcurrency)
+	for i := 0; i < config.MaxConcurrency; i++ {
+		go s.jobWorker()
 	}
 
 	if s.config.NetSandbox != nil {

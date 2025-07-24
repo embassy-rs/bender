@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/sqlbunny/errors"
@@ -134,6 +135,7 @@ func unstring(s string) (string, error) {
 
 type Meta struct {
 	Events          []MetaEvent
+	Priority        int
 	Permissions     map[string]string
 	PermissionRepos []string
 }
@@ -198,6 +200,19 @@ func parseMeta(content string) (*Meta, error) {
 			}
 
 			res.PermissionRepos = append(res.PermissionRepos, directive.Args[1])
+		case "priority":
+			if len(directive.Args) != 2 {
+				return nil, errors.Errorf("line %d: 'priority' directive must have exactly one argument", lineNum)
+			}
+			if len(directive.Conditions) != 0 {
+				return nil, errors.Errorf("line %d: 'priority' directive cannot have conditions", lineNum)
+			}
+
+			priority, err := strconv.Atoi(directive.Args[1])
+			if err != nil {
+				return nil, errors.Errorf("line %d: 'priority' must be a valid integer: %v", lineNum, err)
+			}
+			res.Priority = priority
 		default:
 			return nil, errors.Errorf("line %d: unknown directive '%s'", lineNum, directive.Args[0])
 		}

@@ -27,6 +27,7 @@ func (s *Service) serverRun() {
 	r.Get("/jobs/{jobID}", s.HandleJobLogs)
 	r.Get("/jobs/{jobID}/artifacts", http.RedirectHandler("artifacts/", http.StatusMovedPermanently).ServeHTTP)
 	r.Get("/jobs/{jobID}/artifacts/*", s.HandleJobArtifacts)
+	r.Get("/queue/status", s.HandleQueueStatus)
 	r.Post("/webhook", func(w http.ResponseWriter, r *http.Request) {
 		err := s.handleWebhook(r)
 		if err != nil {
@@ -44,6 +45,13 @@ func (s *Service) serverRun() {
 func validJobID(id string) bool {
 	ok, err := regexp.MatchString("^[a-z0-9]+$", id)
 	return err == nil && ok
+}
+
+func (s *Service) HandleQueueStatus(w http.ResponseWriter, r *http.Request) {
+	status := s.getDetailedQueueStatus()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (s *Service) HandleJobArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -400,6 +408,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 				ID:              makeJobID(),
 				Event:           event,
 				Name:            removeExtension(*f.Name),
+				Priority:        meta.Priority,
 				Script:          *f.Path,
 				Permissions:     meta.Permissions,
 				PermissionRepos: meta.PermissionRepos,
@@ -408,7 +417,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 	}
 
 	for _, job := range jobs {
-		go s.runJob(context.Background(), job)
+		s.enqueueJob(job)
 	}
 
 	return nil
