@@ -98,3 +98,20 @@ func (jq *JobQueue) Len() int {
 	defer jq.mutex.Unlock()
 	return len(jq.pq)
 }
+
+// RemoveByDedupKey removes all jobs from the queue that have the given dedup key
+func (jq *JobQueue) RemoveByDedupKey(dedupKey string) int {
+	jq.mutex.Lock()
+	defer jq.mutex.Unlock()
+
+	removed := 0
+	// Iterate through the queue and remove items with matching dedup key
+	for i := len(jq.pq) - 1; i >= 0; i-- {
+		if jq.pq[i].Job.DedupKey() == dedupKey {
+			heap.Remove(&jq.pq, i)
+			removed++
+		}
+	}
+
+	return removed
+}

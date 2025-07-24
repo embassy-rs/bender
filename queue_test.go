@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/google/go-github/v72/github"
 )
 
 func TestJobQueue(t *testing.T) {
@@ -11,7 +13,7 @@ func TestJobQueue(t *testing.T) {
 		config: Config{
 			MaxConcurrency: 2,
 		},
-		runningJobs: make(map[string]struct{}),
+		runningJobs: make(map[string]*Job),
 		jobQueue:    NewJobQueue(),
 	}
 
@@ -82,5 +84,134 @@ func TestJobPriorityQueue(t *testing.T) {
 	dequeued4 := jq.Dequeue()
 	if dequeued4.ID != "job4" {
 		t.Errorf("Expected job4 (second low priority) fourth, got %s", dequeued4.ID)
+	}
+}
+
+func TestDedupDequeueWaiting(t *testing.T) {
+	// Create a test service
+	s := &Service{
+		config: Config{
+			MaxConcurrency: 1, // Only 1 concurrent job to test waiting
+		},
+		runningJobs:        make(map[string]*Job),
+		runningJobsByDedup: make(map[string]*Job),
+		waitingJobs:        make(map[string][]*Job),
+		jobQueue:           NewJobQueue(),
+	}
+
+	// Create two jobs with the same dedup key
+	job1 := &Job{
+		Event: &Event{
+			Attributes: map[string]string{"branch": "main"},
+			Repo: &github.Repository{
+				Owner: &github.User{Login: github.Ptr("owner")},
+				Name:  github.Ptr("repo"),
+			},
+		},
+		ID:    "job1",
+		Name:  "test",
+		Dedup: DedupDequeue,
+	}
+
+	job2 := &Job{
+		Event: &Event{
+			Attributes: map[string]string{"branch": "main"},
+			Repo: &github.Repository{
+				Owner: &github.User{Login: github.Ptr("owner")},
+				Name:  github.Ptr("repo"),
+			},
+		},
+		ID:    "job2",
+		Name:  "test",
+		Dedup: DedupDequeue,
+	}
+
+	// Simulate job1 already running
+	dedupKey := job1.DedupKey()
+	s.runningJobsMutex.Lock()
+	s.runningJobs[job1.ID] = job1
+	s.runningJobsByDedup[dedupKey] = job1
+	s.runningJobsMutex.Unlock()
+
+	// Enqueue job2 - it should wait since job1 is running with same dedup key
+	s.enqueueJob(job2)
+
+	// Check that job2 is in waiting list
+	s.runningJobsMutex.Lock()
+	waitingJobs := s.waitingJobs[dedupKey]
+	s.runningJobsMutex.Unlock()
+
+	if len(waitingJobs) != 1 {
+		t.Errorf("Expected 1 waiting job, got %d", len(waitingJobs))
+	}
+	if waitingJobs[0].ID != job2.ID {
+		t.Errorf("Expected waiting job to be job2, got %s", waitingJobs[0].ID)
+	}
+
+	// Check that job2 is not in the main queue
+	if s.jobQueue.Len() != 0 {
+		t.Errorf("Expected main queue to be empty, got %d jobs", s.jobQueue.Len())
+	}
+
+	// Simulate job1 finishing
+	s.enqueueWaitingJobs(dedupKey)
+
+	// Check that job2 is now in the main queue
+	if s.jobQueue.Len() != 1 {
+		t.Errorf("Expected 1 job in main queue after waiting job enqueued, got %d", s.jobQueue.Len())
+	}
+
+	// Check that waiting list is empty
+	s.runningJobsMutex.Lock()
+	waitingJobs = s.waitingJobs[dedupKey]
+	s.runningJobsMutex.Unlock()
+
+	if len(waitingJobs) != 0 {
+		t.Errorf("Expected waiting list to be empty after enqueuing, got %d jobs", len(waitingJobs))
+	}
+}
+
+func TestDedupDequeueNoWaitingWhenNoRunning(t *testing.T) {
+	// Create a test service
+	s := &Service{
+		config: Config{
+			MaxConcurrency: 2,
+		},
+		runningJobs:        make(map[string]*Job),
+		runningJobsByDedup: make(map[string]*Job),
+		waitingJobs:        make(map[string][]*Job),
+		jobQueue:           NewJobQueue(),
+	}
+
+	// Create a job with dedup=dequeue
+	job := &Job{
+		Event: &Event{
+			Attributes: map[string]string{"branch": "main"},
+			Repo: &github.Repository{
+				Owner: &github.User{Login: github.Ptr("owner")},
+				Name:  github.Ptr("repo"),
+			},
+		},
+		ID:    "job1",
+		Name:  "test",
+		Dedup: DedupDequeue,
+	}
+
+	// Enqueue job when no duplicate is running
+	s.enqueueJob(job)
+
+	// Check that job goes directly to main queue (no waiting)
+	if s.jobQueue.Len() != 1 {
+		t.Errorf("Expected 1 job in main queue, got %d", s.jobQueue.Len())
+	}
+
+	// Check that waiting list is empty
+	dedupKey := job.DedupKey()
+	s.runningJobsMutex.Lock()
+	waitingJobs := s.waitingJobs[dedupKey]
+	s.runningJobsMutex.Unlock()
+
+	if len(waitingJobs) != 0 {
+		t.Errorf("Expected no waiting jobs, got %d", len(waitingJobs))
 	}
 }

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -42,8 +44,10 @@ type Service struct {
 	config     Config
 	containerd *containerd.Client
 
-	runningJobsMutex sync.Mutex
-	runningJobs      map[string]struct{}
+	runningJobsMutex   sync.Mutex
+	runningJobs        map[string]*Job   // jobID -> Job
+	runningJobsByDedup map[string]*Job   // dedupKey -> Job
+	waitingJobs        map[string][]*Job // dedupKey -> slice of waiting jobs
 
 	jobQueue *JobQueue
 
@@ -76,9 +80,44 @@ type Job struct {
 	ID              string            `json:"id"`
 	Name            string            `json:"name"`
 	Priority        int               `json:"priority"`
+	Dedup           DedupMode         `json:"-"` // Deduplication mode
 	Script          string            `json:"-"`
 	Permissions     map[string]string `json:"-"`
 	PermissionRepos []string          `json:"-"`
+
+	// Internal fields for job management
+	cancelFunc context.CancelFunc `json:"-"` // Function to cancel this job
+}
+
+// Cancel cancels the job if it's running
+func (j *Job) Cancel() {
+	if j.cancelFunc != nil {
+		j.cancelFunc()
+	}
+}
+
+// DedupKey generates a unique deduplication key for this job
+func (j *Job) DedupKey() string {
+	if j.Dedup == DedupNone {
+		return "" // No deduplication
+	}
+
+	// Handle nil fields for tests
+	if j.Repo == nil || j.Repo.Owner == nil || j.Repo.Owner.Login == nil || j.Repo.Name == nil {
+		return fmt.Sprintf("test/%s", j.Name) // Fallback for tests
+	}
+
+	// Base key: owner/repo/jobname
+	key := fmt.Sprintf("%s/%s/%s", *j.Repo.Owner.Login, *j.Repo.Name, j.Name)
+
+	// Add branch or PR number
+	if j.PullRequest != nil && j.PullRequest.Number != nil {
+		key += fmt.Sprintf("/pr-%d", *j.PullRequest.Number)
+	} else if branch, ok := j.Attributes["branch"]; ok {
+		key += fmt.Sprintf("/branch-%s", branch)
+	}
+
+	return key
 }
 
 func main() {
@@ -131,11 +170,13 @@ func main() {
 	cgroup := initCgroup()
 
 	s := Service{
-		config:      config,
-		containerd:  cntd,
-		runningJobs: make(map[string]struct{}),
-		jobQueue:    NewJobQueue(),
-		cgroup:      cgroup,
+		config:             config,
+		containerd:         cntd,
+		runningJobs:        make(map[string]*Job),
+		runningJobsByDedup: make(map[string]*Job),
+		waitingJobs:        make(map[string][]*Job),
+		jobQueue:           NewJobQueue(),
+		cgroup:             cgroup,
 	}
 
 	// Start job queue workers

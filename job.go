@@ -50,9 +50,61 @@ func (s *Service) jobWorker() {
 // enqueueJob adds a job to the queue
 func (s *Service) enqueueJob(job *Job) {
 	queuedJobs, runningJobs := s.getQueueStatus()
-	log.Printf("Enqueuing job %s (%s) [Priority: %d] - Queue: %d jobs, Running: %d/%d",
-		job.ID, job.Name, job.Priority, queuedJobs, runningJobs, s.config.MaxConcurrency)
+	log.Printf("Enqueuing job %s (%s) [Priority: %d, Dedup: %s] - Queue: %d jobs, Running: %d/%d",
+		job.ID, job.Name, job.Priority, job.Dedup, queuedJobs, runningJobs, s.config.MaxConcurrency)
+
+	// Handle deduplication
+	if job.Dedup != DedupNone {
+		dedupKey := job.DedupKey()
+
+		// Remove queued jobs with the same dedup key
+		s.jobQueue.RemoveByDedupKey(dedupKey)
+
+		// Handle running jobs based on dedup mode
+		switch job.Dedup {
+		case DedupKill:
+			s.runningJobsMutex.Lock()
+			if runningJob, exists := s.runningJobsByDedup[dedupKey]; exists {
+				// Signal the running job to be cancelled
+				runningJob.Cancel()
+				log.Printf("Killing running job %s due to deduplication", runningJob.ID)
+			}
+			s.runningJobsMutex.Unlock()
+		case DedupDequeue:
+			// For dequeue mode, check if there's a running job with the same dedup key
+			s.runningJobsMutex.Lock()
+			if runningJob, exists := s.runningJobsByDedup[dedupKey]; exists {
+				// There's a running job, add this job to the waiting list
+				s.waitingJobs[dedupKey] = append(s.waitingJobs[dedupKey], job)
+				s.runningJobsMutex.Unlock()
+				log.Printf("Job %s (%s) is waiting for running job %s to finish (dedup key: %s)",
+					job.ID, job.Name, runningJob.ID, dedupKey)
+				return // Don't enqueue the job yet
+			}
+			s.runningJobsMutex.Unlock()
+			log.Printf("No running duplicate found for dedup key: %s, proceeding with job %s", dedupKey, job.ID)
+		}
+	}
+
 	s.jobQueue.Enqueue(job)
+}
+
+// enqueueWaitingJobs checks for jobs waiting for the given dedup key and enqueues them
+func (s *Service) enqueueWaitingJobs(dedupKey string) {
+	if dedupKey == "" {
+		return
+	}
+
+	s.runningJobsMutex.Lock()
+	waitingJobs := s.waitingJobs[dedupKey]
+	delete(s.waitingJobs, dedupKey)
+	s.runningJobsMutex.Unlock()
+
+	for _, waitingJob := range waitingJobs {
+		log.Printf("Enqueuing previously waiting job %s (%s) for dedup key: %s",
+			waitingJob.ID, waitingJob.Name, dedupKey)
+		s.jobQueue.Enqueue(waitingJob)
+	}
 }
 
 // getQueueStatus returns the current queue status
@@ -69,6 +121,21 @@ func (s *Service) getQueueStatus() (queuedJobs int, runningJobs int) {
 func (s *Service) getDetailedQueueStatus() map[string]interface{} {
 	s.runningJobsMutex.Lock()
 	runningJobs := len(s.runningJobs)
+
+	// Get information about waiting jobs
+	waitingJobsCount := 0
+	waitingJobsInfo := make([]map[string]interface{}, 0)
+	for dedupKey, jobs := range s.waitingJobs {
+		waitingJobsCount += len(jobs)
+		for _, job := range jobs {
+			waitingJobsInfo = append(waitingJobsInfo, map[string]interface{}{
+				"id":        job.ID,
+				"name":      job.Name,
+				"priority":  job.Priority,
+				"dedup_key": dedupKey,
+			})
+		}
+	}
 	s.runningJobsMutex.Unlock()
 
 	s.jobQueue.mutex.Lock()
@@ -87,10 +154,12 @@ func (s *Service) getDetailedQueueStatus() map[string]interface{} {
 	s.jobQueue.mutex.Unlock()
 
 	return map[string]interface{}{
-		"queued_jobs":      queuedJobs,
-		"running_jobs":     runningJobs,
-		"max_concurrency":  s.config.MaxConcurrency,
-		"queued_jobs_info": queuedJobsInfo,
+		"queued_jobs":       queuedJobs,
+		"running_jobs":      runningJobs,
+		"waiting_jobs":      waitingJobsCount,
+		"max_concurrency":   s.config.MaxConcurrency,
+		"queued_jobs_info":  queuedJobsInfo,
+		"waiting_jobs_info": waitingJobsInfo,
 	}
 }
 
@@ -116,14 +185,34 @@ func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, stat
 }
 
 func (s *Service) runJob(ctx context.Context, job *Job) {
+	// Create a cancellable context for this job
+	ctx, cancel := context.WithCancel(ctx)
+
+	// Set the cancel function in the job
+	job.cancelFunc = cancel
+
 	s.runningJobsMutex.Lock()
-	s.runningJobs[job.ID] = struct{}{}
+	s.runningJobs[job.ID] = job
+	// Track by dedup key if deduplication is enabled
+	if job.Dedup != DedupNone {
+		s.runningJobsByDedup[job.DedupKey()] = job
+	}
 	s.runningJobsMutex.Unlock()
 
 	defer func() {
+		var dedupKey string
 		s.runningJobsMutex.Lock()
 		delete(s.runningJobs, job.ID)
+		if job.Dedup != DedupNone {
+			dedupKey = job.DedupKey()
+			delete(s.runningJobsByDedup, dedupKey)
+		}
 		s.runningJobsMutex.Unlock()
+
+		// Check for waiting jobs after releasing the mutex
+		if dedupKey != "" {
+			s.enqueueWaitingJobs(dedupKey)
+		}
 	}()
 
 	logs, err := os.Create(filepath.Join(s.config.DataDir, "logs", job.ID))

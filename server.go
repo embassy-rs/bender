@@ -409,6 +409,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 				Event:           event,
 				Name:            removeExtension(*f.Name),
 				Priority:        meta.Priority,
+				Dedup:           meta.Dedup,
 				Script:          *f.Path,
 				Permissions:     meta.Permissions,
 				PermissionRepos: meta.PermissionRepos,

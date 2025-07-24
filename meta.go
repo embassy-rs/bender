@@ -133,9 +133,46 @@ func unstring(s string) (string, error) {
 	return string(out), nil
 }
 
+// DedupMode represents the job deduplication mode
+type DedupMode int
+
+const (
+	DedupNone    DedupMode = iota // No deduplication
+	DedupDequeue                  // Remove queued duplicates, wait for running duplicates
+	DedupKill                     // Remove queued duplicates and kill running duplicates
+)
+
+func (d DedupMode) String() string {
+	switch d {
+	case DedupNone:
+		return "none"
+	case DedupDequeue:
+		return "dequeue"
+	case DedupKill:
+		return "kill"
+	default:
+		return "none"
+	}
+}
+
+// ParseDedupMode converts a string to DedupMode
+func ParseDedupMode(s string) (DedupMode, error) {
+	switch s {
+	case "none":
+		return DedupNone, nil
+	case "dequeue":
+		return DedupDequeue, nil
+	case "kill":
+		return DedupKill, nil
+	default:
+		return DedupNone, fmt.Errorf("invalid dedup mode: %s", s)
+	}
+}
+
 type Meta struct {
 	Events          []MetaEvent
 	Priority        int
+	Dedup           DedupMode // Deduplication mode
 	Permissions     map[string]string
 	PermissionRepos []string
 }
@@ -148,6 +185,7 @@ type MetaEvent struct {
 func parseMeta(content string) (*Meta, error) {
 	res := Meta{
 		Events:          []MetaEvent{},
+		Dedup:           DedupNone, // Default deduplication mode
 		Permissions:     map[string]string{},
 		PermissionRepos: []string{},
 	}
@@ -213,6 +251,23 @@ func parseMeta(content string) (*Meta, error) {
 				return nil, errors.Errorf("line %d: 'priority' must be a valid integer: %v", lineNum, err)
 			}
 			res.Priority = priority
+		case "dedup":
+			if len(directive.Args) != 2 {
+				return nil, errors.Errorf("line %d: 'dedup' directive must have exactly one argument", lineNum)
+			}
+			if len(directive.Conditions) != 0 {
+				return nil, errors.Errorf("line %d: 'dedup' directive cannot have conditions", lineNum)
+			}
+
+			dedup := directive.Args[1]
+			if dedup != "none" && dedup != "dequeue" && dedup != "kill" {
+				return nil, errors.Errorf("line %d: 'dedup' must be 'none', 'dequeue', or 'kill', got '%s'", lineNum, dedup)
+			}
+			dedupMode, err := ParseDedupMode(dedup)
+			if err != nil {
+				return nil, errors.Errorf("line %d: %v", lineNum, err)
+			}
+			res.Dedup = dedupMode
 		default:
 			return nil, errors.Errorf("line %d: unknown directive '%s'", lineNum, directive.Args[0])
 		}
