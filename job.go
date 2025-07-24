@@ -18,7 +18,7 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
-	"github.com/google/go-github/v52/github"
+	"github.com/google/go-github/v72/github"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sqlbunny/errors"
@@ -38,8 +38,8 @@ func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, stat
 		*j.Repo.Name,
 		j.SHA,
 		&github.RepoStatus{
-			State:     github.String(state),
-			Context:   github.String(fmt.Sprintf("ci/%s", j.Name)),
+			State:     github.Ptr(state),
+			Context:   github.Ptr(fmt.Sprintf("ci/%s", j.Name)),
 			TargetURL: &url,
 		})
 	return err
@@ -429,7 +429,7 @@ func (s *Service) postComment(ctx context.Context, job *Job, gh *github.Client, 
 
 	// post comment to github
 	_, _, err = gh.Issues.CreateComment(ctx, *job.Repo.Owner.Login, *job.Repo.Name, *job.PullRequest.Number, &github.IssueComment{
-		Body: github.String(string(comment)),
+		Body: github.Ptr(string(comment)),
 	})
 	if err != nil {
 		return err
@@ -450,8 +450,8 @@ func removeSymlinks(path string) error {
 
 func (s *Service) getRepoToken(ctx context.Context, job *Job) (string, error) {
 	var permissions = github.InstallationPermissions{
-		Metadata: github.String("read"),
-		Contents: github.String("read"),
+		Metadata: github.Ptr("read"),
+		Contents: github.Ptr("read"),
 	}
 	var repositories = []string{
 		*job.Repo.Name,
@@ -465,27 +465,27 @@ func (s *Service) getRepoToken(ctx context.Context, job *Job) (string, error) {
 
 			switch key {
 			case "actions":
-				permissions.Actions = github.String(value)
+				permissions.Actions = github.Ptr(value)
 			case "checks":
-				permissions.Checks = github.String(value)
+				permissions.Checks = github.Ptr(value)
 			case "contents":
-				permissions.Contents = github.String(value)
+				permissions.Contents = github.Ptr(value)
 			case "deployments":
-				permissions.Deployments = github.String(value)
+				permissions.Deployments = github.Ptr(value)
 			case "issues":
-				permissions.Issues = github.String(value)
+				permissions.Issues = github.Ptr(value)
 			case "packages":
-				permissions.Packages = github.String(value)
+				permissions.Packages = github.Ptr(value)
 			case "pages":
-				permissions.Pages = github.String(value)
+				permissions.Pages = github.Ptr(value)
 			case "pull_requests":
-				permissions.PullRequests = github.String(value)
+				permissions.PullRequests = github.Ptr(value)
 			case "repository_projects":
-				permissions.RepositoryProjects = github.String(value)
+				permissions.RepositoryProjects = github.Ptr(value)
 			case "security_events":
-				permissions.SecurityEvents = github.String(value)
+				permissions.SecurityEvents = github.Ptr(value)
 			case "statuses":
-				permissions.Statuses = github.String(value)
+				permissions.Statuses = github.Ptr(value)
 			default:
 				return "", errors.Errorf("Unknown permission: %q", key)
 			}

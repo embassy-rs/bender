@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/google/go-github/v52/github"
+	"github.com/google/go-github/v72/github"
 	"github.com/sqlbunny/errors"
 )
 
@@ -268,7 +268,7 @@ func (s *Service) handleCommands(ctx context.Context, gh *github.Client, outEven
 
 	if errors != "" {
 		_, _, err := gh.Issues.CreateComment(ctx, *e.Repo.Owner.Login, *e.Repo.Name, *e.Issue.Number, &github.IssueComment{
-			Body: github.String(errors),
+			Body: github.Ptr(errors),
 		})
 		if err != nil {
 			log.Printf("Failed to post comment with command errors: %v", err)

@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd"
-	"github.com/google/go-github/v52/github"
+	"github.com/google/go-github/v72/github"
 	"gopkg.in/yaml.v3"
 )
 
