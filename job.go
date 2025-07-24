@@ -53,6 +53,17 @@ func (s *Service) enqueueJob(job *Job) {
 	log.Printf("Enqueuing job %s (%s) [Priority: %d, Dedup: %s] - Queue: %d jobs, Running: %d/%d",
 		job.ID, job.Name, job.Priority, job.Dedup, queuedJobs, runningJobs, s.config.MaxConcurrency)
 
+	// Report status to GitHub that job is being processed
+	gh, err := s.githubClient(job.InstallationID)
+	if err != nil {
+		log.Printf("error creating github client for status update: %v", err)
+	} else {
+		err = s.setStatus(context.Background(), gh, job, "pending", "Job enqueued")
+		if err != nil {
+			log.Printf("error setting enqueued status: %v", err)
+		}
+	}
+
 	// Handle deduplication
 	if job.Dedup != DedupNone {
 		dedupKey := job.DedupKey()
@@ -79,6 +90,14 @@ func (s *Service) enqueueJob(job *Job) {
 				s.runningJobsMutex.Unlock()
 				log.Printf("Job %s (%s) is waiting for running job %s to finish (dedup key: %s)",
 					job.ID, job.Name, runningJob.ID, dedupKey)
+
+				// Report waiting status to GitHub
+				if gh != nil {
+					err = s.setStatus(context.Background(), gh, job, "pending", fmt.Sprintf("Waiting for job %s to finish", runningJob.ID))
+					if err != nil {
+						log.Printf("error setting waiting status: %v", err)
+					}
+				}
 				return // Don't enqueue the job yet
 			}
 			s.runningJobsMutex.Unlock()
@@ -103,6 +122,18 @@ func (s *Service) enqueueWaitingJobs(dedupKey string) {
 	for _, waitingJob := range waitingJobs {
 		log.Printf("Enqueuing previously waiting job %s (%s) for dedup key: %s",
 			waitingJob.ID, waitingJob.Name, dedupKey)
+
+		// Report status update when moving from waiting to queued
+		gh, err := s.githubClient(waitingJob.InstallationID)
+		if err != nil {
+			log.Printf("error creating github client for status update: %v", err)
+		} else {
+			err = s.setStatus(context.Background(), gh, waitingJob, "pending", "Job enqueued")
+			if err != nil {
+				log.Printf("error setting queued status for waiting job: %v", err)
+			}
+		}
+
 		s.jobQueue.Enqueue(waitingJob)
 	}
 }
@@ -124,16 +155,17 @@ func (s *Service) isJobRunning(id string) bool {
 	return isRunning
 }
 
-func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, state string) error {
+func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, state string, description string) error {
 	url := fmt.Sprintf("%s/jobs/%s", s.config.ExternalURL, j.ID)
 	_, _, err := gh.Repositories.CreateStatus(ctx,
 		*j.Repo.Owner.Login,
 		*j.Repo.Name,
 		j.SHA,
 		&github.RepoStatus{
-			State:     github.Ptr(state),
-			Context:   github.Ptr(fmt.Sprintf("ci/%s", j.Name)),
-			TargetURL: &url,
+			State:       github.Ptr(state),
+			Context:     github.Ptr(fmt.Sprintf("ci/%s", j.Name)),
+			Description: github.Ptr(description),
+			TargetURL:   &url,
 		})
 	return err
 }
@@ -181,7 +213,7 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	err = s.setStatus(ctx, gh, job, "pending")
+	err = s.setStatus(ctx, gh, job, "pending", "Job is running...")
 	if err != nil {
 		log.Printf("error creating pending status: %v", err)
 	}
@@ -191,13 +223,15 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 	})
 
 	result := "success"
+	description := "Job completed successfully"
 	if err != nil {
 		fmt.Fprintf(logs, "run failed: %v\n", err)
 		log.Printf("job run failed: %v", err)
 		result = "failure"
+		description = fmt.Sprintf("Job failed: %v", err)
 	}
 
-	err = s.setStatus(ctx, gh, job, result)
+	err = s.setStatus(ctx, gh, job, result, description)
 	if err != nil {
 		log.Printf("error creating result status: %v", err)
 	}
