@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/google/go-github/v72/github"
@@ -87,6 +88,7 @@ type Job struct {
 
 	// Internal fields for job management
 	cancelFunc context.CancelFunc `json:"-"` // Function to cancel this job
+	StartTime  time.Time          `json:"-"` // When the job started running
 }
 
 // Cancel cancels the job if it's running

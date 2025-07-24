@@ -174,8 +174,9 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 	// Create a cancellable context for this job
 	jobCtx, cancel := context.WithCancel(ctx)
 
-	// Set the cancel function in the job
+	// Set the cancel function and start time in the job
 	job.cancelFunc = cancel
+	job.StartTime = time.Now()
 
 	s.runningJobsMutex.Lock()
 	s.runningJobs[job.ID] = job
