@@ -115,3 +115,15 @@ func (jq *JobQueue) RemoveByDedupKey(dedupKey string) int {
 
 	return removed
 }
+
+// GetAllJobs returns a copy of all jobs currently in the queue
+func (jq *JobQueue) GetAllJobs() []*Job {
+	jq.mutex.Lock()
+	defer jq.mutex.Unlock()
+
+	jobs := make([]*Job, len(jq.pq))
+	for i, item := range jq.pq {
+		jobs[i] = item.Job
+	}
+	return jobs
+}

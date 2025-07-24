@@ -117,52 +117,6 @@ func (s *Service) getQueueStatus() (queuedJobs int, runningJobs int) {
 	return queuedJobs, runningJobs
 }
 
-// getDetailedQueueStatus returns detailed information about the queue
-func (s *Service) getDetailedQueueStatus() map[string]interface{} {
-	s.runningJobsMutex.Lock()
-	runningJobs := len(s.runningJobs)
-
-	// Get information about waiting jobs
-	waitingJobsCount := 0
-	waitingJobsInfo := make([]map[string]interface{}, 0)
-	for dedupKey, jobs := range s.waitingJobs {
-		waitingJobsCount += len(jobs)
-		for _, job := range jobs {
-			waitingJobsInfo = append(waitingJobsInfo, map[string]interface{}{
-				"id":        job.ID,
-				"name":      job.Name,
-				"priority":  job.Priority,
-				"dedup_key": dedupKey,
-			})
-		}
-	}
-	s.runningJobsMutex.Unlock()
-
-	s.jobQueue.mutex.Lock()
-	queuedJobs := len(s.jobQueue.pq)
-
-	// Get information about queued jobs
-	queuedJobsInfo := make([]map[string]interface{}, 0, queuedJobs)
-	for _, item := range s.jobQueue.pq {
-		queuedJobsInfo = append(queuedJobsInfo, map[string]interface{}{
-			"id":       item.Job.ID,
-			"name":     item.Job.Name,
-			"priority": item.Priority,
-			"enqueued": item.Timestamp.Format("2006-01-02T15:04:05Z07:00"),
-		})
-	}
-	s.jobQueue.mutex.Unlock()
-
-	return map[string]interface{}{
-		"queued_jobs":       queuedJobs,
-		"running_jobs":      runningJobs,
-		"waiting_jobs":      waitingJobsCount,
-		"max_concurrency":   s.config.MaxConcurrency,
-		"queued_jobs_info":  queuedJobsInfo,
-		"waiting_jobs_info": waitingJobsInfo,
-	}
-}
-
 func (s *Service) isJobRunning(id string) bool {
 	s.runningJobsMutex.Lock()
 	_, isRunning := s.runningJobs[id]

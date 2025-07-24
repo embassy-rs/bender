@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,10 +26,10 @@ func (s *Service) serverRun() {
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+	r.Get("/", s.HandleDashboard)
 	r.Get("/jobs/{jobID}", s.HandleJobLogs)
 	r.Get("/jobs/{jobID}/artifacts", http.RedirectHandler("artifacts/", http.StatusMovedPermanently).ServeHTTP)
 	r.Get("/jobs/{jobID}/artifacts/*", s.HandleJobArtifacts)
-	r.Get("/queue/status", s.HandleQueueStatus)
 	r.Post("/webhook", func(w http.ResponseWriter, r *http.Request) {
 		err := s.handleWebhook(r)
 		if err != nil {
@@ -47,11 +49,191 @@ func validJobID(id string) bool {
 	return err == nil && ok
 }
 
-func (s *Service) HandleQueueStatus(w http.ResponseWriter, r *http.Request) {
-	status := s.getDetailedQueueStatus()
+// DashboardData holds the data for the dashboard template
+type DashboardData struct {
+	AllJobs     []*JobDisplayInfo
+	LastUpdated string
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+// JobDisplayInfo holds the display information for a job
+type JobDisplayInfo struct {
+	ID            string
+	Name          string        // Job name
+	Repository    template.HTML // Changed to template.HTML for clickable links
+	SHA           template.HTML // Changed to template.HTML for clickable links
+	Priority      int
+	DedupMode     string
+	GitHubPRLink  template.HTML
+	LogsURL       string
+	Status        string // Running, Queued, Waiting
+	QueuePosition int    // 0 for non-queued jobs
+}
+
+var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"add": func(a, b int) int { return a + b },
+}).Parse(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Bender CI Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .status-running { background-color: #d4edda; }
+        .status-queued { background-color: #fff3cd; }
+        .status-waiting { background-color: #d1ecf1; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .queue-pos { text-align: center; }
+        .queue-pos.empty { color: #ccc; }
+    </style>
+</head>
+<body>
+    <h1>Bender CI Dashboard</h1>
+    
+    <table>
+        <tr>
+            <th>Status</th>
+            <th>#</th>
+            <th>Job ID</th>
+            <th>Job Name</th>
+            <th>Repository</th>
+            <th>SHA</th>
+            <th>Prio</th>
+            <th>Dedup</th>
+            <th>GitHub PR</th>
+            <th>Logs</th>
+        </tr>
+        {{range .AllJobs}}
+        <tr class="status-{{.Status}}">
+            <td>{{.Status}}</td>
+            <td class="queue-pos{{if eq .QueuePosition 0}} empty{{end}}">
+                {{if gt .QueuePosition 0}}{{.QueuePosition}}{{else}}-{{end}}
+            </td>
+            <td>{{.ID}}</td>
+            <td>{{.Name}}</td>
+            <td>{{.Repository}}</td>
+            <td>{{.SHA}}</td>
+            <td>{{.Priority}}</td>
+            <td>{{.DedupMode}}</td>
+            <td>{{.GitHubPRLink}}</td>
+            <td><a href="{{.LogsURL}}">View Logs</a></td>
+        </tr>
+        {{end}}
+    </table>
+    
+    <p><small>Last updated: {{.LastUpdated}}</small></p>
+</body>
+</html>`))
+
+func (s *Service) HandleDashboard(w http.ResponseWriter, r *http.Request) {
+	s.runningJobsMutex.Lock()
+	defer s.runningJobsMutex.Unlock()
+
+	var allJobs []*JobDisplayInfo
+
+	// Collect running jobs and sort them by ID for consistent ordering
+	var runningJobsSlice []*Job
+	for _, job := range s.runningJobs {
+		runningJobsSlice = append(runningJobsSlice, job)
+	}
+	sort.Slice(runningJobsSlice, func(i, j int) bool {
+		return runningJobsSlice[i].ID < runningJobsSlice[j].ID
+	})
+
+	for _, job := range runningJobsSlice {
+		info := createJobDisplayInfo(job)
+		info.Status = "running"
+		info.QueuePosition = 0
+		allJobs = append(allJobs, info)
+	}
+
+	// Collect pending jobs (already sorted by priority in the queue)
+	pendingJobs := s.jobQueue.GetAllJobs()
+	for i, job := range pendingJobs {
+		info := createJobDisplayInfo(job)
+		info.Status = "queued"
+		info.QueuePosition = i + 1
+		allJobs = append(allJobs, info)
+	}
+
+	// Collect waiting jobs and sort them by ID for consistent ordering
+	var waitingJobsSlice []*Job
+	for _, jobs := range s.waitingJobs {
+		for _, job := range jobs {
+			waitingJobsSlice = append(waitingJobsSlice, job)
+		}
+	}
+	sort.Slice(waitingJobsSlice, func(i, j int) bool {
+		return waitingJobsSlice[i].ID < waitingJobsSlice[j].ID
+	})
+
+	for _, job := range waitingJobsSlice {
+		info := createJobDisplayInfo(job)
+		info.Status = "waiting"
+		info.QueuePosition = 0
+		allJobs = append(allJobs, info)
+	}
+
+	data := DashboardData{
+		AllJobs:     allJobs,
+		LastUpdated: time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+
+	err := dashboardTemplate.Execute(w, data)
+	if err != nil {
+		log.Printf("Error executing dashboard template: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+}
+
+func createJobDisplayInfo(job *Job) *JobDisplayInfo {
+	info := &JobDisplayInfo{
+		ID:        job.ID,
+		Name:      job.Name,
+		Priority:  job.Priority,
+		DedupMode: job.Dedup.String(),
+		LogsURL:   "/jobs/" + job.ID,
+	}
+
+	// Safe repository name as clickable link
+	if job.Repo != nil && job.Repo.FullName != nil && job.Repo.HTMLURL != nil {
+		info.Repository = template.HTML(fmt.Sprintf(`<a href="%s" target="_blank">%s</a>`,
+			template.HTMLEscapeString(*job.Repo.HTMLURL),
+			template.HTMLEscapeString(*job.Repo.FullName)))
+	} else if job.Repo != nil && job.Repo.FullName != nil {
+		info.Repository = template.HTML(template.HTMLEscapeString(*job.Repo.FullName))
+	} else {
+		info.Repository = template.HTML("unknown")
+	}
+
+	// Safe SHA as clickable link to commit
+	shortSHA := job.SHA[:8]
+	if job.Repo != nil && job.Repo.HTMLURL != nil {
+		commitURL := fmt.Sprintf("%s/commit/%s", *job.Repo.HTMLURL, job.SHA)
+		info.SHA = template.HTML(fmt.Sprintf(`<a href="%s" target="_blank">%s</a>`,
+			template.HTMLEscapeString(commitURL),
+			template.HTMLEscapeString(shortSHA)))
+	} else {
+		info.SHA = template.HTML(template.HTMLEscapeString(shortSHA))
+	}
+
+	// Safe GitHub PR link generation
+	if job.PullRequest != nil && job.PullRequest.Number != nil && job.PullRequest.HTMLURL != nil {
+		// Use template.HTML to mark this as safe HTML since we're generating it safely
+		info.GitHubPRLink = template.HTML(fmt.Sprintf(`<a href="%s" target="_blank">PR #%d</a>`,
+			template.HTMLEscapeString(*job.PullRequest.HTMLURL),
+			*job.PullRequest.Number))
+	} else {
+		info.GitHubPRLink = template.HTML("-")
+	}
+
+	return info
 }
 
 func (s *Service) HandleJobArtifacts(w http.ResponseWriter, r *http.Request) {
