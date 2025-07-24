@@ -404,12 +404,18 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 		}
 
 		if matched {
+			// Determine dedup mode: default to kill for PR jobs, otherwise use metadata
+			dedupMode := meta.Dedup
+			if dedupMode == DedupNone && event.Event == "pull_request" {
+				dedupMode = DedupKill
+			}
+
 			jobs = append(jobs, &Job{
 				ID:              makeJobID(),
 				Event:           event,
 				Name:            removeExtension(*f.Name),
 				Priority:        meta.Priority,
-				Dedup:           meta.Dedup,
+				Dedup:           dedupMode,
 				Script:          *f.Path,
 				Permissions:     meta.Permissions,
 				PermissionRepos: meta.PermissionRepos,
