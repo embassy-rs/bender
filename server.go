@@ -128,58 +128,47 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 </html>`))
 
 func (s *Service) HandleDashboard(w http.ResponseWriter, r *http.Request) {
-	s.runningJobsMutex.Lock()
-	defer s.runningJobsMutex.Unlock()
+	allJobs := s.queue.getAllJobs()
 
-	var allJobs []*JobDisplayInfo
+	var displayJobs []*JobDisplayInfo
+	queuePosition := 1
 
-	// Collect running jobs and sort them by when they started (longest running first)
-	var runningJobsSlice []*Job
-	for _, job := range s.runningJobs {
-		runningJobsSlice = append(runningJobsSlice, job)
-	}
-
-	// Sort by start time - earliest start time first (longest running)
-	sort.Slice(runningJobsSlice, func(i, j int) bool {
-		return runningJobsSlice[i].StartTime.Before(runningJobsSlice[j].StartTime)
-	})
-
-	for _, job := range runningJobsSlice {
-		info := createJobDisplayInfo(job)
-		info.Status = "running"
-		info.QueuePosition = 0
-		allJobs = append(allJobs, info)
-	}
-
-	// Collect pending jobs (already sorted by priority in the queue)
-	pendingJobs := s.jobQueue.GetAllJobs()
-	for i, job := range pendingJobs {
-		info := createJobDisplayInfo(job)
-		info.Status = "queued"
-		info.QueuePosition = i + 1
-		allJobs = append(allJobs, info)
-	}
-
-	// Collect waiting jobs and sort them by ID for consistent ordering
-	var waitingJobsSlice []*Job
-	for _, jobs := range s.waitingJobs {
-		for _, job := range jobs {
-			waitingJobsSlice = append(waitingJobsSlice, job)
+	// Sort all jobs: running first (by start time), then queued (by priority/enqueue time)
+	sort.Slice(allJobs, func(i, j int) bool {
+		// Running jobs come first, sorted by start time (longest running first)
+		if allJobs[i].State == JobStateRunning && allJobs[j].State == JobStateRunning {
+			return allJobs[i].StartedAt.Before(allJobs[j].StartedAt)
 		}
-	}
-	sort.Slice(waitingJobsSlice, func(i, j int) bool {
-		return waitingJobsSlice[i].ID < waitingJobsSlice[j].ID
+		if allJobs[i].State == JobStateRunning {
+			return true
+		}
+		if allJobs[j].State == JobStateRunning {
+			return false
+		}
+
+		// Then queued jobs, sorted by priority (higher first), then by enqueue time (earlier first)
+		if allJobs[i].Priority != allJobs[j].Priority {
+			return allJobs[i].Priority > allJobs[j].Priority
+		}
+		return allJobs[i].EnqueuedAt.Before(allJobs[j].EnqueuedAt)
 	})
 
-	for _, job := range waitingJobsSlice {
+	for _, job := range allJobs {
 		info := createJobDisplayInfo(job)
-		info.Status = "waiting"
-		info.QueuePosition = 0
-		allJobs = append(allJobs, info)
+		info.Status = job.State.String()
+
+		if job.State == JobStateQueued {
+			info.QueuePosition = queuePosition
+			queuePosition++
+		} else {
+			info.QueuePosition = 0
+		}
+
+		displayJobs = append(displayJobs, info)
 	}
 
 	data := DashboardData{
-		AllJobs:     allJobs,
+		AllJobs:     displayJobs,
 		LastUpdated: time.Now().Format("2006-01-02 15:04:05"),
 	}
 
@@ -270,7 +259,7 @@ func (s *Service) HandleJobLogs(w http.ResponseWriter, r *http.Request) {
 
 	buf := make([]byte, 32*1024)
 
-	if s.isJobRunning(jobID) {
+	if s.queue.isJobRunning(jobID) {
 		// padding to make browsers instantly start rendering the document
 		// as it arrives from the network. Browsers seem to wait until a minimum
 		// of data has been received before rendering anything...
@@ -310,7 +299,7 @@ func (s *Service) HandleJobLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if n == 0 {
-			if !s.isJobRunning(jobID) {
+			if !s.queue.isJobRunning(jobID) {
 				return
 			}
 
@@ -608,7 +597,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 	}
 
 	for _, job := range jobs {
-		s.enqueueJob(job)
+		s.queue.enqueueJob(job, s)
 	}
 
 	return nil

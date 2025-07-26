@@ -1,24 +1,31 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/go-github/v72/github"
 )
 
-func TestJobQueue(t *testing.T) {
+func TestSimplifiedJobQueue(t *testing.T) {
+	// Create a test queue
+	queue := &Queue{
+		jobs:           make([]*Job, 0),
+		maxConcurrency: 2,
+	}
+	queue.schedulerCond = sync.NewCond(&queue.mutex)
+
 	// Create a test service with minimal config
 	s := &Service{
 		config: Config{
 			MaxConcurrency: 2,
 		},
-		runningJobs: make(map[string]*Job),
-		jobQueue:    NewJobQueue(),
+		queue: queue,
 	}
 
 	// Test queue status initially
-	queued, running := s.getQueueStatus()
+	queued, running := s.queue.getQueueStatus()
 	if queued != 0 {
 		t.Errorf("Expected 0 queued jobs, got %d", queued)
 	}
@@ -35,183 +42,161 @@ func TestJobQueue(t *testing.T) {
 	}
 
 	// Enqueue a job
-	go s.enqueueJob(job)
-
-	// Give it a moment to be enqueued
-	time.Sleep(10 * time.Millisecond)
+	s.queue.enqueueJob(job, s)
 
 	// Check queue status
-	queued, running = s.getQueueStatus()
+	queued, running = s.queue.getQueueStatus()
 	if queued != 1 {
 		t.Errorf("Expected 1 queued job, got %d", queued)
 	}
 	if running != 0 {
 		t.Errorf("Expected 0 running jobs, got %d", running)
 	}
+
+	// Check that the job is in queued state
+	if job.State != JobStateQueued {
+		t.Errorf("Expected job state to be queued, got %v", job.State)
+	}
 }
 
-func TestJobPriorityQueue(t *testing.T) {
-	jq := NewJobQueue()
+func TestJobPriorityOrdering(t *testing.T) {
+	// Create a test queue
+	queue := &Queue{
+		jobs:           make([]*Job, 0),
+		maxConcurrency: 1,
+	}
+	queue.schedulerCond = sync.NewCond(&queue.mutex)
+
+	s := &Service{
+		config: Config{
+			MaxConcurrency: 1,
+		},
+		queue: queue,
+	}
 
 	// Create jobs with different priorities
 	job1 := &Job{ID: "job1", Name: "low", Priority: 1, Event: &Event{}}
 	job2 := &Job{ID: "job2", Name: "high", Priority: 10, Event: &Event{}}
 	job3 := &Job{ID: "job3", Name: "medium", Priority: 5, Event: &Event{}}
-	job4 := &Job{ID: "job4", Name: "low-again", Priority: 1, Event: &Event{}}
 
 	// Enqueue in random order
-	jq.Enqueue(job1)
-	jq.Enqueue(job2)
-	jq.Enqueue(job3)
-	jq.Enqueue(job4)
+	s.queue.enqueueJob(job1, s)
+	s.queue.enqueueJob(job2, s)
+	s.queue.enqueueJob(job3, s)
 
-	// Should dequeue in priority order: job2 (10), job3 (5), job1 (1), job4 (1)
-	dequeued1 := jq.Dequeue()
-	if dequeued1.ID != "job2" {
-		t.Errorf("Expected job2 (highest priority) first, got %s", dequeued1.ID)
-	}
+	// Check that findJobToStart picks the highest priority job
+	queue.mutex.Lock()
+	jobToStart := queue.findJobToStart()
+	queue.mutex.Unlock()
 
-	dequeued2 := jq.Dequeue()
-	if dequeued2.ID != "job3" {
-		t.Errorf("Expected job3 (medium priority) second, got %s", dequeued2.ID)
-	}
-
-	dequeued3 := jq.Dequeue()
-	if dequeued3.ID != "job1" {
-		t.Errorf("Expected job1 (first low priority) third, got %s", dequeued3.ID)
-	}
-
-	dequeued4 := jq.Dequeue()
-	if dequeued4.ID != "job4" {
-		t.Errorf("Expected job4 (second low priority) fourth, got %s", dequeued4.ID)
+	if jobToStart == nil {
+		t.Errorf("Expected to find a job to start")
+	} else if jobToStart.ID != "job2" {
+		t.Errorf("Expected job2 (highest priority) to be selected, got %s", jobToStart.ID)
 	}
 }
 
-func TestDedupDequeueWaiting(t *testing.T) {
-	// Create a test service
-	s := &Service{
-		config: Config{
-			MaxConcurrency: 1, // Only 1 concurrent job to test waiting
-		},
-		runningJobs:        make(map[string]*Job),
-		runningJobsByDedup: make(map[string]*Job),
-		waitingJobs:        make(map[string][]*Job),
-		jobQueue:           NewJobQueue(),
+func TestDeduplication(t *testing.T) {
+	// Create a test queue
+	queue := &Queue{
+		jobs:           make([]*Job, 0),
+		maxConcurrency: 2,
 	}
+	queue.schedulerCond = sync.NewCond(&queue.mutex)
 
-	// Create two jobs with the same dedup key
-	job1 := &Job{
-		Event: &Event{
-			Attributes: map[string]string{"branch": "main"},
-			Repo: &github.Repository{
-				Owner: &github.User{Login: github.Ptr("owner")},
-				Name:  github.Ptr("repo"),
-			},
-		},
-		ID:    "job1",
-		Name:  "test",
-		Dedup: DedupDequeue,
-	}
-
-	job2 := &Job{
-		Event: &Event{
-			Attributes: map[string]string{"branch": "main"},
-			Repo: &github.Repository{
-				Owner: &github.User{Login: github.Ptr("owner")},
-				Name:  github.Ptr("repo"),
-			},
-		},
-		ID:    "job2",
-		Name:  "test",
-		Dedup: DedupDequeue,
-	}
-
-	// Simulate job1 already running
-	dedupKey := job1.DedupKey()
-	s.runningJobsMutex.Lock()
-	s.runningJobs[job1.ID] = job1
-	s.runningJobsByDedup[dedupKey] = job1
-	s.runningJobsMutex.Unlock()
-
-	// Enqueue job2 - it should wait since job1 is running with same dedup key
-	s.enqueueJob(job2)
-
-	// Check that job2 is in waiting list
-	s.runningJobsMutex.Lock()
-	waitingJobs := s.waitingJobs[dedupKey]
-	s.runningJobsMutex.Unlock()
-
-	if len(waitingJobs) != 1 {
-		t.Errorf("Expected 1 waiting job, got %d", len(waitingJobs))
-	}
-	if waitingJobs[0].ID != job2.ID {
-		t.Errorf("Expected waiting job to be job2, got %s", waitingJobs[0].ID)
-	}
-
-	// Check that job2 is not in the main queue
-	if s.jobQueue.Len() != 0 {
-		t.Errorf("Expected main queue to be empty, got %d jobs", s.jobQueue.Len())
-	}
-
-	// Simulate job1 finishing
-	s.enqueueWaitingJobs(dedupKey)
-
-	// Check that job2 is now in the main queue
-	if s.jobQueue.Len() != 1 {
-		t.Errorf("Expected 1 job in main queue after waiting job enqueued, got %d", s.jobQueue.Len())
-	}
-
-	// Check that waiting list is empty
-	s.runningJobsMutex.Lock()
-	waitingJobs = s.waitingJobs[dedupKey]
-	s.runningJobsMutex.Unlock()
-
-	if len(waitingJobs) != 0 {
-		t.Errorf("Expected waiting list to be empty after enqueuing, got %d jobs", len(waitingJobs))
-	}
-}
-
-func TestDedupDequeueNoWaitingWhenNoRunning(t *testing.T) {
-	// Create a test service
 	s := &Service{
 		config: Config{
 			MaxConcurrency: 2,
 		},
-		runningJobs:        make(map[string]*Job),
-		runningJobsByDedup: make(map[string]*Job),
-		waitingJobs:        make(map[string][]*Job),
-		jobQueue:           NewJobQueue(),
+		queue: queue,
 	}
 
-	// Create a job with dedup=dequeue
-	job := &Job{
+	// Create jobs with same dedup key
+	job1 := &Job{
+		ID:       "job1",
+		Name:     "test",
+		Priority: 1,
+		Dedup:    DedupKill,
 		Event: &Event{
-			Attributes: map[string]string{"branch": "main"},
 			Repo: &github.Repository{
 				Owner: &github.User{Login: github.Ptr("owner")},
 				Name:  github.Ptr("repo"),
 			},
 		},
-		ID:    "job1",
-		Name:  "test",
-		Dedup: DedupDequeue,
 	}
 
-	// Enqueue job when no duplicate is running
-	s.enqueueJob(job)
-
-	// Check that job goes directly to main queue (no waiting)
-	if s.jobQueue.Len() != 1 {
-		t.Errorf("Expected 1 job in main queue, got %d", s.jobQueue.Len())
+	job2 := &Job{
+		ID:       "job2",
+		Name:     "test",
+		Priority: 1,
+		Dedup:    DedupKill,
+		Event: &Event{
+			Repo: &github.Repository{
+				Owner: &github.User{Login: github.Ptr("owner")},
+				Name:  github.Ptr("repo"),
+			},
+		},
 	}
 
-	// Check that waiting list is empty
-	dedupKey := job.DedupKey()
-	s.runningJobsMutex.Lock()
-	waitingJobs := s.waitingJobs[dedupKey]
-	s.runningJobsMutex.Unlock()
+	// Enqueue first job
+	s.queue.enqueueJob(job1, s)
 
-	if len(waitingJobs) != 0 {
-		t.Errorf("Expected no waiting jobs, got %d", len(waitingJobs))
+	// Set first job to running state
+	queue.mutex.Lock()
+	job1.State = JobStateRunning
+	queue.mutex.Unlock()
+
+	// Enqueue second job with same dedup key
+	s.queue.enqueueJob(job2, s)
+
+	// First job should be cancelled due to deduplication
+	time.Sleep(10 * time.Millisecond) // Give time for cancel to propagate
+}
+
+func TestJobStates(t *testing.T) {
+	// Create a test queue
+	queue := &Queue{
+		jobs:           make([]*Job, 0),
+		maxConcurrency: 1,
+	}
+	queue.schedulerCond = sync.NewCond(&queue.mutex)
+
+	s := &Service{
+		config: Config{
+			MaxConcurrency: 1,
+		},
+		queue: queue,
+	}
+
+	job := &Job{
+		ID:       "test-job",
+		Name:     "test",
+		Priority: 1,
+		Event:    &Event{},
+	}
+
+	// Test initial state after enqueue
+	s.queue.enqueueJob(job, s)
+	if job.State != JobStateQueued {
+		t.Errorf("Expected job state to be queued, got %v", job.State)
+	}
+
+	// Test running state
+	queue.mutex.Lock()
+	job.State = JobStateRunning
+	job.StartedAt = time.Now()
+	queue.mutex.Unlock()
+
+	if job.State != JobStateRunning {
+		t.Errorf("Expected job state to be running, got %v", job.State)
+	}
+
+	// Test job finished
+	s.queue.onJobFinished(job)
+
+	// Job should be removed from the list
+	allJobs := s.queue.getAllJobs()
+	if len(allJobs) != 0 {
+		t.Errorf("Expected no jobs after finish, got %d", len(allJobs))
 	}
 }

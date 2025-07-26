@@ -3,15 +3,11 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 
 	"github.com/containerd/containerd"
-	"github.com/google/go-github/v72/github"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,82 +40,8 @@ type GithubConfig struct {
 type Service struct {
 	config     Config
 	containerd *containerd.Client
-
-	runningJobsMutex   sync.Mutex
-	runningJobs        map[string]*Job   // jobID -> Job
-	runningJobsByDedup map[string]*Job   // dedupKey -> Job
-	waitingJobs        map[string][]*Job // dedupKey -> slice of waiting jobs
-
-	jobQueue *JobQueue
-
-	cgroup CgroupManager
-}
-
-type Event struct {
-	Event      string            `json:"event"`
-	Attributes map[string]string `json:"-"`
-
-	Repo           *github.Repository  `json:"repository"`
-	PullRequest    *github.PullRequest `json:"pull_request"`
-	CloneURL       string              `json:"-"`
-	SHA            string              `json:"-"`
-	InstallationID int64               `json:"-"`
-
-	// Cache[0] is the primary cache, Cache[1:] are secondary caches
-	// that will be cloned into the primary cache if the primary cache
-	// does not exist.
-	// Example for PR 1234, which targets the foo branch:
-	//    "pr-1234", "branch-foo", "branch-main"
-	Cache []string `json:"-"`
-
-	// If true, secrets will be mounted.
-	Trusted bool `json:"-"`
-}
-
-type Job struct {
-	*Event
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	Priority        int               `json:"priority"`
-	Dedup           DedupMode         `json:"-"` // Deduplication mode
-	Script          string            `json:"-"`
-	Permissions     map[string]string `json:"-"`
-	PermissionRepos []string          `json:"-"`
-
-	// Internal fields for job management
-	cancelFunc context.CancelFunc `json:"-"` // Function to cancel this job
-	StartTime  time.Time          `json:"-"` // When the job started running
-}
-
-// Cancel cancels the job if it's running
-func (j *Job) Cancel() {
-	if j.cancelFunc != nil {
-		j.cancelFunc()
-	}
-}
-
-// DedupKey generates a unique deduplication key for this job
-func (j *Job) DedupKey() string {
-	if j.Dedup == DedupNone {
-		return "" // No deduplication
-	}
-
-	// Handle nil fields for tests
-	if j.Repo == nil || j.Repo.Owner == nil || j.Repo.Owner.Login == nil || j.Repo.Name == nil {
-		return fmt.Sprintf("test/%s", j.Name) // Fallback for tests
-	}
-
-	// Base key: owner/repo/jobname
-	key := fmt.Sprintf("%s/%s/%s", *j.Repo.Owner.Login, *j.Repo.Name, j.Name)
-
-	// Add branch or PR number
-	if j.PullRequest != nil && j.PullRequest.Number != nil {
-		key += fmt.Sprintf("/pr-%d", *j.PullRequest.Number)
-	} else if branch, ok := j.Attributes["branch"]; ok {
-		key += fmt.Sprintf("/branch-%s", branch)
-	}
-
-	return key
+	queue      *Queue
+	cgroup     CgroupManager
 }
 
 func main() {
@@ -171,21 +93,18 @@ func main() {
 
 	cgroup := initCgroup()
 
+	queue := newQueue(config.MaxConcurrency)
+
 	s := Service{
-		config:             config,
-		containerd:         cntd,
-		runningJobs:        make(map[string]*Job),
-		runningJobsByDedup: make(map[string]*Job),
-		waitingJobs:        make(map[string][]*Job),
-		jobQueue:           NewJobQueue(),
-		cgroup:             cgroup,
+		config:     config,
+		containerd: cntd,
+		queue:      queue,
+		cgroup:     cgroup,
 	}
 
-	// Start job queue workers
-	log.Printf("Starting job queue with max concurrency: %d", config.MaxConcurrency)
-	for i := 0; i < config.MaxConcurrency; i++ {
-		go s.jobWorker()
-	}
+	// Start the scheduler
+	log.Printf("Starting job scheduler with max concurrency: %d", config.MaxConcurrency)
+	go s.schedulerRun()
 
 	if s.config.NetSandbox != nil {
 		go s.netRun()
@@ -194,4 +113,11 @@ func main() {
 	go s.cacheGCRun()
 
 	s.serverRun()
+}
+
+func (s Service) schedulerRun() {
+	for {
+		job := s.queue.nextJob()
+		go s.runJob(context.Background(), job)
+	}
 }

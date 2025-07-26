@@ -24,135 +24,92 @@ import (
 	"github.com/sqlbunny/errors"
 )
 
-// jobWorker continuously processes jobs from the queue
-func (s *Service) jobWorker() {
-	for {
-		job := s.jobQueue.Dequeue()
+type Event struct {
+	Event      string            `json:"event"`
+	Attributes map[string]string `json:"-"`
 
-		queuedJobs := s.jobQueue.Len()
-		s.runningJobsMutex.Lock()
-		runningJobs := len(s.runningJobs)
-		s.runningJobsMutex.Unlock()
+	Repo           *github.Repository  `json:"repository"`
+	PullRequest    *github.PullRequest `json:"pull_request"`
+	CloneURL       string              `json:"-"`
+	SHA            string              `json:"-"`
+	InstallationID int64               `json:"-"`
 
-		log.Printf("Starting job %s (%s) [Priority: %d] - Queue: %d jobs, Running: %d/%d",
-			job.ID, job.Name, job.Priority, queuedJobs, runningJobs, s.config.MaxConcurrency)
+	// Cache[0] is the primary cache, Cache[1:] are secondary caches
+	// that will be cloned into the primary cache if the primary cache
+	// does not exist.
+	// Example for PR 1234, which targets the foo branch:
+	//    "pr-1234", "branch-foo", "branch-main"
+	Cache []string `json:"-"`
 
-		s.runJob(context.Background(), job)
+	// If true, secrets will be mounted.
+	Trusted bool `json:"-"`
+}
 
-		s.runningJobsMutex.Lock()
-		delete(s.runningJobs, job.ID)
-		s.runningJobsMutex.Unlock()
+// JobState represents the current state of a job
+type JobState int
 
-		log.Printf("Finished job %s (%s)", job.ID, job.Name)
+const (
+	JobStateQueued  JobState = iota // Job is queued and waiting to be started
+	JobStateRunning                 // Job is currently running
+)
+
+func (s JobState) String() string {
+	switch s {
+	case JobStateQueued:
+		return "queued"
+	case JobStateRunning:
+		return "running"
+	default:
+		return "unknown"
 	}
 }
 
-// enqueueJob adds a job to the queue
-func (s *Service) enqueueJob(job *Job) {
-	queuedJobs, runningJobs := s.getQueueStatus()
-	log.Printf("Enqueuing job %s (%s) [Priority: %d, Dedup: %s] - Queue: %d jobs, Running: %d/%d",
-		job.ID, job.Name, job.Priority, job.Dedup, queuedJobs, runningJobs, s.config.MaxConcurrency)
+type Job struct {
+	*Event
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Priority        int               `json:"priority"`
+	Dedup           DedupMode         `json:"-"` // Deduplication mode
+	Script          string            `json:"-"`
+	Permissions     map[string]string `json:"-"`
+	PermissionRepos []string          `json:"-"`
 
-	// Report status to GitHub that job is being processed
-	gh, err := s.githubClient(job.InstallationID)
-	if err != nil {
-		log.Printf("error creating github client for status update: %v", err)
-	} else {
-		err = s.setStatus(context.Background(), gh, job, "pending", "Job enqueued")
-		if err != nil {
-			log.Printf("error setting enqueued status: %v", err)
-		}
-	}
-
-	// Handle deduplication
-	if job.Dedup != DedupNone {
-		dedupKey := job.DedupKey()
-
-		// Remove queued jobs with the same dedup key
-		s.jobQueue.RemoveByDedupKey(dedupKey)
-
-		// Handle running jobs based on dedup mode
-		switch job.Dedup {
-		case DedupKill:
-			s.runningJobsMutex.Lock()
-			if runningJob, exists := s.runningJobsByDedup[dedupKey]; exists {
-				// Signal the running job to be cancelled
-				runningJob.Cancel()
-				log.Printf("Killing running job %s due to deduplication", runningJob.ID)
-			}
-			s.runningJobsMutex.Unlock()
-		case DedupDequeue:
-			// For dequeue mode, check if there's a running job with the same dedup key
-			s.runningJobsMutex.Lock()
-			if runningJob, exists := s.runningJobsByDedup[dedupKey]; exists {
-				// There's a running job, add this job to the waiting list
-				s.waitingJobs[dedupKey] = append(s.waitingJobs[dedupKey], job)
-				s.runningJobsMutex.Unlock()
-				log.Printf("Job %s (%s) is waiting for running job %s to finish (dedup key: %s)",
-					job.ID, job.Name, runningJob.ID, dedupKey)
-
-				// Report waiting status to GitHub
-				if gh != nil {
-					err = s.setStatus(context.Background(), gh, job, "pending", fmt.Sprintf("Waiting for job %s to finish", runningJob.ID))
-					if err != nil {
-						log.Printf("error setting waiting status: %v", err)
-					}
-				}
-				return // Don't enqueue the job yet
-			}
-			s.runningJobsMutex.Unlock()
-			log.Printf("No running duplicate found for dedup key: %s, proceeding with job %s", dedupKey, job.ID)
-		}
-	}
-
-	s.jobQueue.Enqueue(job)
+	// Internal fields for job management
+	State      JobState           `json:"-"` // Current state of the job
+	EnqueuedAt time.Time          `json:"-"` // When the job was enqueued
+	StartedAt  time.Time          `json:"-"` // When the job started running
+	cancelFunc context.CancelFunc `json:"-"` // Function to cancel this job
 }
 
-// enqueueWaitingJobs checks for jobs waiting for the given dedup key and enqueues them
-func (s *Service) enqueueWaitingJobs(dedupKey string) {
-	if dedupKey == "" {
-		return
-	}
-
-	s.runningJobsMutex.Lock()
-	waitingJobs := s.waitingJobs[dedupKey]
-	delete(s.waitingJobs, dedupKey)
-	s.runningJobsMutex.Unlock()
-
-	for _, waitingJob := range waitingJobs {
-		log.Printf("Enqueuing previously waiting job %s (%s) for dedup key: %s",
-			waitingJob.ID, waitingJob.Name, dedupKey)
-
-		// Report status update when moving from waiting to queued
-		gh, err := s.githubClient(waitingJob.InstallationID)
-		if err != nil {
-			log.Printf("error creating github client for status update: %v", err)
-		} else {
-			err = s.setStatus(context.Background(), gh, waitingJob, "pending", "Job enqueued")
-			if err != nil {
-				log.Printf("error setting queued status for waiting job: %v", err)
-			}
-		}
-
-		s.jobQueue.Enqueue(waitingJob)
+// Cancel cancels the job if it's running
+func (j *Job) Cancel() {
+	if j.cancelFunc != nil {
+		j.cancelFunc()
 	}
 }
 
-// getQueueStatus returns the current queue status
-func (s *Service) getQueueStatus() (queuedJobs int, runningJobs int) {
-	s.runningJobsMutex.Lock()
-	runningJobs = len(s.runningJobs)
-	s.runningJobsMutex.Unlock()
+// DedupKey generates a unique deduplication key for this job
+func (j *Job) DedupKey() string {
+	if j.Dedup == DedupNone {
+		return "" // No deduplication
+	}
 
-	queuedJobs = s.jobQueue.Len()
-	return queuedJobs, runningJobs
-}
+	// Handle nil fields for tests
+	if j.Repo == nil || j.Repo.Owner == nil || j.Repo.Owner.Login == nil || j.Repo.Name == nil {
+		return fmt.Sprintf("test/%s", j.Name) // Fallback for tests
+	}
 
-func (s *Service) isJobRunning(id string) bool {
-	s.runningJobsMutex.Lock()
-	_, isRunning := s.runningJobs[id]
-	s.runningJobsMutex.Unlock()
-	return isRunning
+	// Base key: owner/repo/jobname
+	key := fmt.Sprintf("%s/%s/%s", *j.Repo.Owner.Login, *j.Repo.Name, j.Name)
+
+	// Add branch or PR number
+	if j.PullRequest != nil && j.PullRequest.Number != nil {
+		key += fmt.Sprintf("/pr-%d", *j.PullRequest.Number)
+	} else if branch, ok := j.Attributes["branch"]; ok {
+		key += fmt.Sprintf("/branch-%s", branch)
+	}
+
+	return key
 }
 
 func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, state string, description string) error {
@@ -174,32 +131,12 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 	// Create a cancellable context for this job
 	jobCtx, cancel := context.WithCancel(ctx)
 
-	// Set the cancel function and start time in the job
+	// Set the cancel function in the job
 	job.cancelFunc = cancel
-	job.StartTime = time.Now()
-
-	s.runningJobsMutex.Lock()
-	s.runningJobs[job.ID] = job
-	// Track by dedup key if deduplication is enabled
-	if job.Dedup != DedupNone {
-		s.runningJobsByDedup[job.DedupKey()] = job
-	}
-	s.runningJobsMutex.Unlock()
 
 	defer func() {
-		var dedupKey string
-		s.runningJobsMutex.Lock()
-		delete(s.runningJobs, job.ID)
-		if job.Dedup != DedupNone {
-			dedupKey = job.DedupKey()
-			delete(s.runningJobsByDedup, dedupKey)
-		}
-		s.runningJobsMutex.Unlock()
-
-		// Check for waiting jobs after releasing the mutex
-		if dedupKey != "" {
-			s.enqueueWaitingJobs(dedupKey)
-		}
+		// Call onJobFinished when the job completes
+		s.queue.onJobFinished(job)
 	}()
 
 	logs, err := os.Create(filepath.Join(s.config.DataDir, "logs", job.ID))
