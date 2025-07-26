@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -119,11 +120,28 @@ func (q *Queue) findJobToStart() *Job {
 		return nil
 	}
 
+	// Find the highest major priority among running jobs
+	highestRunningMajor := math.MinInt
+	for _, job := range q.jobs {
+		if job.State == JobStateRunning {
+			major := job.Priority / 100
+			if major > highestRunningMajor {
+				highestRunningMajor = major
+			}
+		}
+	}
+
 	var candidates []*Job
 
 	// Collect all jobs that can start
 	for _, job := range q.jobs {
 		if job.State != JobStateQueued {
+			continue
+		}
+
+		// Check major priority constraint: cannot start if there's a running job with higher major priority
+		major := job.Priority / 100
+		if highestRunningMajor > major {
 			continue
 		}
 
