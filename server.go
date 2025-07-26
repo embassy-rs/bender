@@ -382,7 +382,8 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			Trusted: true,
 		})
 	case *github.PullRequestEvent:
-		if *e.Action == "opened" || *e.Action == "synchronize" {
+		switch *e.Action {
+		case "opened", "synchronize":
 			events = append(events, &Event{
 				Event: "pull_request",
 				Attributes: map[string]string{
@@ -399,6 +400,21 @@ func (s *Service) handleWebhook(r *http.Request) error {
 					fmt.Sprintf("branch-%s", *e.Repo.DefaultBranch),
 				},
 				Trusted: isPRTrusted(e.Repo, e.PullRequest),
+			})
+		case "closed":
+			// Kill all jobs from this PR
+			log.Printf("Killing all jobs for PR #%d in %s/%s", *e.PullRequest.Number, *e.Repo.Owner.Login, *e.Repo.Name)
+
+			s.queue.killJobs(func(job *Job) bool {
+				return job.PullRequest != nil &&
+					job.PullRequest.Number != nil &&
+					*job.PullRequest.Number == *e.PullRequest.Number &&
+					job.Repo != nil &&
+					job.Repo.Owner != nil &&
+					job.Repo.Owner.Login != nil &&
+					job.Repo.Name != nil &&
+					*job.Repo.Owner.Login == *e.Repo.Owner.Login &&
+					*job.Repo.Name == *e.Repo.Name
 			})
 		}
 	case *github.IssueCommentEvent:

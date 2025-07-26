@@ -237,3 +237,26 @@ func (q *Queue) getAllJobs() []*Job {
 	copy(jobs, q.jobs)
 	return jobs
 }
+
+// killJobs kills all jobs (queued and running) that match the given condition
+func (q *Queue) killJobs(condition func(*Job) bool) {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	// Iterate backwards to safely remove jobs while iterating
+	for i := len(q.jobs) - 1; i >= 0; i-- {
+		job := q.jobs[i]
+
+		if condition(job) {
+			switch job.State {
+			case JobStateRunning:
+				log.Printf("Killing running job %s (%s)", job.ID, job.Name)
+				job.Cancel()
+			case JobStateQueued:
+				log.Printf("Dequeuing job %s (%s)", job.ID, job.Name)
+				// Remove from queue
+				q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+			}
+		}
+	}
+}
