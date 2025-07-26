@@ -138,7 +138,7 @@ func (s *Service) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, job := range s.runningJobs {
 		runningJobsSlice = append(runningJobsSlice, job)
 	}
-	
+
 	// Sort by start time - earliest start time first (longest running)
 	sort.Slice(runningJobsSlice, func(i, j int) bool {
 		return runningJobsSlice[i].StartTime.Before(runningJobsSlice[j].StartTime)

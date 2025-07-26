@@ -52,7 +52,7 @@ type Service struct {
 
 	jobQueue *JobQueue
 
-	cgroup Cgroup
+	cgroup CgroupManager
 }
 
 type Event struct {

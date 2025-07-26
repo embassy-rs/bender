@@ -447,8 +447,18 @@ detachedHead = false
 	}
 
 	// setup cgroup
+	jobCGroup, err := s.cgroup.CreateJobCgroup(job.ID)
+	if err != nil {
+		return err
+	}
+
+	err = jobCGroup.SetValue("memory.oom.group", "1")
+	if err != nil {
+		log.Printf("Warning: failed to set memory.oom.group=1 for job %s: %v", job.ID, err)
+		// Don't fail the job if we can't set this - it's not critical
+	}
+
 	jobName := fmt.Sprintf("job-%s", job.ID)
-	cgroup := filepath.Join(s.cgroup.jobs, jobName)
 
 	container, err := s.containerd.NewContainer(ctx, jobName,
 		containerd.WithNewSnapshot(fmt.Sprintf("job-%s-rootfs", job.ID), image),
@@ -462,7 +472,7 @@ detachedHead = false
 				"HOME=/ci",
 				"GITHUB_TOKEN=" + token,
 			}),
-			oci.WithCgroup(cgroup),
+			oci.WithCgroup(jobCGroup.Path),
 			oci.WithHostNamespace(specs.NetworkNamespace), // TODO network sandboxing
 			oci.WithMounts(mounts),
 		),
