@@ -33,33 +33,56 @@ func newQueue(maxConcurrency int) *Queue {
 
 // enqueueJob adds a job to the queue and signals the scheduler
 func (q *Queue) enqueueJob(job *Job, s *Service) {
-	job.State = JobStateQueued
-	job.EnqueuedAt = time.Now()
+	q.enqueueJobs([]*Job{job}, s)
+}
+
+// enqueueJobs adds multiple jobs to the queue atomically and signals the scheduler
+func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
+	if len(jobs) == 0 {
+		return
+	}
+
+	// Set initial state and enqueue time for all jobs
+	now := time.Now()
+	for _, job := range jobs {
+		job.State = JobStateQueued
+		job.EnqueuedAt = now
+	}
 
 	queuedJobs, runningJobs := q.getQueueStatus()
-	log.Printf("Enqueuing job %s (%s) [Priority: %d, Dedup: %s] - Queue: %d jobs, Running: %d/%d",
-		job.ID, job.Name, job.Priority, job.Dedup, queuedJobs, runningJobs, q.maxConcurrency)
+	log.Printf("Enqueuing %d jobs atomically - Queue: %d jobs, Running: %d/%d",
+		len(jobs), queuedJobs, runningJobs, q.maxConcurrency)
 
-	// Report status to GitHub that job is being processed
-	gh, err := s.githubClient(job.InstallationID)
-	if err != nil {
-		log.Printf("error creating github client for status update: %v", err)
-	} else {
-		err = s.setStatus(context.Background(), gh, job, "pending", "Job enqueued")
+	// Report status to GitHub for all jobs
+	for _, job := range jobs {
+		log.Printf("  - Job %s (%s) [Priority: %d, Dedup: %s]",
+			job.ID, job.Name, job.Priority, job.Dedup)
+
+		gh, err := s.githubClient(job.InstallationID)
 		if err != nil {
-			log.Printf("error setting enqueued status: %v", err)
+			log.Printf("error creating github client for status update: %v", err)
+		} else {
+			err = s.setStatus(context.Background(), gh, job, "pending", "Job enqueued")
+			if err != nil {
+				log.Printf("error setting enqueued status: %v", err)
+			}
 		}
 	}
 
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 
-	// Handle deduplication
-	if job.Dedup != DedupNone {
-		q.handleDeduplication(job)
+	// Handle deduplication for all jobs
+	for _, job := range jobs {
+		if job.Dedup != DedupNone {
+			q.handleDeduplication(job)
+		}
 	}
 
-	q.jobs = append(q.jobs, job)
+	// Add all jobs to the queue
+	q.jobs = append(q.jobs, jobs...)
+
+	// Signal the scheduler (once for all jobs)
 	q.schedulerCond.Signal()
 }
 

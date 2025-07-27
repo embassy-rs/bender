@@ -430,6 +430,7 @@ func (s *Service) handleWebhook(r *http.Request) error {
 		return nil
 	}
 
+	var allJobs []*Job
 	for _, event := range events {
 		if event.CloneURL == "" {
 			event.CloneURL = *event.Repo.CloneURL
@@ -438,11 +439,15 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			event.Attributes = map[string]string{}
 		}
 
-		err = s.handleEvent(ctx, gh, event)
+		jobs, err := s.handleEvent(ctx, gh, event)
 		if err != nil {
 			return err
 		}
+		allJobs = append(allJobs, jobs...)
 	}
+
+	// Enqueue all jobs atomically to prevent priority starvation
+	s.queue.enqueueJobs(allJobs, s)
 
 	return nil
 }
@@ -532,19 +537,19 @@ func (s *Service) handleCommand(ctx context.Context, gh *github.Client, outEvent
 	}
 }
 
-func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Event) error {
+func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Event) ([]*Job, error) {
 	getOpts := &github.RepositoryContentGetOptions{
 		Ref: event.SHA,
 	}
 	_, dir, _, err := gh.Repositories.GetContents(ctx, *event.Repo.Owner.Login, *event.Repo.Name, ".github/ci", getOpts)
 	if is404(err) {
 		log.Printf("`.github/ci` directory does not exist")
-		return nil
+		return nil, nil
 	} else if err != nil {
-		return err
+		return nil, err
 	} else if dir == nil {
 		log.Printf("`.github/ci` is not a directory")
-		return nil
+		return nil, nil
 	}
 
 	var jobs []*Job
@@ -556,12 +561,12 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 
 		file, _, _, err := gh.Repositories.GetContents(ctx, *event.Repo.Owner.Login, *event.Repo.Name, *f.Path, getOpts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		content, err := file.GetContent()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		meta, err := parseMeta(content)
@@ -612,11 +617,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 		}
 	}
 
-	for _, job := range jobs {
-		s.queue.enqueueJob(job, s)
-	}
-
-	return nil
+	return jobs, nil
 }
 
 func parseEventInstallationID(payload []byte) (int64, error) {
