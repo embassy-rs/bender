@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sqlbunny/errors"
 )
@@ -172,7 +173,8 @@ func ParseDedupMode(s string) (DedupMode, error) {
 type Meta struct {
 	Events          []MetaEvent
 	Priority        int
-	Dedup           DedupMode // Deduplication mode
+	Dedup           DedupMode     // Deduplication mode
+	Cooldown        time.Duration // Cooldown duration before job can start
 	Permissions     map[string]string
 	PermissionRepos []string
 }
@@ -268,6 +270,19 @@ func parseMeta(content string) (*Meta, error) {
 				return nil, errors.Errorf("line %d: %v", lineNum, err)
 			}
 			res.Dedup = dedupMode
+		case "cooldown":
+			if len(directive.Args) != 2 {
+				return nil, errors.Errorf("line %d: 'cooldown' directive must have exactly one argument", lineNum)
+			}
+			if len(directive.Conditions) != 0 {
+				return nil, errors.Errorf("line %d: 'cooldown' directive cannot have conditions", lineNum)
+			}
+
+			cooldown, err := time.ParseDuration(directive.Args[1])
+			if err != nil {
+				return nil, errors.Errorf("line %d: 'cooldown' must be a valid duration: %v", lineNum, err)
+			}
+			res.Cooldown = cooldown
 		default:
 			return nil, errors.Errorf("line %d: unknown directive '%s'", lineNum, directive.Args[0])
 		}

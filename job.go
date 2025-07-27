@@ -70,15 +70,18 @@ type Job struct {
 	Name            string            `json:"name"`
 	Priority        int               `json:"priority"`
 	Dedup           DedupMode         `json:"-"` // Deduplication mode
+	Cooldown        time.Duration     `json:"-"` // Cooldown duration before job can start
 	Script          string            `json:"-"`
 	Permissions     map[string]string `json:"-"`
 	PermissionRepos []string          `json:"-"`
 
 	// Internal fields for job management
-	State      JobState           `json:"-"` // Current state of the job
-	EnqueuedAt time.Time          `json:"-"` // When the job was enqueued
-	StartedAt  time.Time          `json:"-"` // When the job started running
-	cancelFunc context.CancelFunc `json:"-"` // Function to cancel this job
+	State           JobState           `json:"-"` // Current state of the job
+	EnqueuedAt      time.Time          `json:"-"` // When the job was enqueued
+	StartedAt       time.Time          `json:"-"` // When the job started running
+	RunnableAt      time.Time          `json:"-"` // When the job became runnable (for cooldown)
+	CooldownReadyAt time.Time          `json:"-"` // When the cooldown expires and job can actually start
+	cancelFunc      context.CancelFunc `json:"-"` // Function to cancel this job
 }
 
 // Cancel cancels the job if it's running

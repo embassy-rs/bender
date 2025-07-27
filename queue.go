@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"sort"
@@ -55,8 +56,12 @@ func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
 
 	// Report status to GitHub for all jobs
 	for _, job := range jobs {
-		log.Printf("  - Job %s (%s) [Priority: %d, Dedup: %s]",
-			job.ID, job.Name, job.Priority, job.Dedup)
+		cooldownStr := ""
+		if job.Cooldown > 0 {
+			cooldownStr = fmt.Sprintf(", Cooldown: %v", job.Cooldown)
+		}
+		log.Printf("  - Job %s (%s) [Priority: %d, Dedup: %s%s]",
+			job.ID, job.Name, job.Priority, job.Dedup, cooldownStr)
 
 		gh, err := s.githubClient(job.InstallationID)
 		if err != nil {
@@ -123,6 +128,17 @@ func (q *Queue) nextJob() *Job {
 		if job != nil {
 			break
 		}
+
+		// Check if there are jobs in cooldown that will become ready soon
+		nextCooldownExpiry := q.findNextCooldownExpiry()
+		if !nextCooldownExpiry.IsZero() {
+			// Wait with timeout for either a signal or the cooldown to expire
+			go func() {
+				time.Sleep(time.Until(nextCooldownExpiry))
+				q.schedulerCond.Signal()
+			}()
+		}
+
 		// Wait for signal if no jobs can be started
 		q.schedulerCond.Wait()
 	}
@@ -136,25 +152,15 @@ func (q *Queue) nextJob() *Job {
 }
 
 // findJobToStart finds the best job to start based on priority and wait time
-// Returns nil if no job can start (handles both dedup logic and candidate selection)
+// Returns nil if no job can start (handles dedup logic, cooldown, and candidate selection)
 func (q *Queue) findJobToStart() *Job {
 	runningCount := q.countJobsByState(JobStateRunning)
 	if runningCount >= q.maxConcurrency {
 		return nil
 	}
 
-	// Find the highest major priority among running jobs
-	highestRunningMajor := math.MinInt
-	for _, job := range q.jobs {
-		if job.State == JobStateRunning {
-			major := job.Priority / 100
-			if major > highestRunningMajor {
-				highestRunningMajor = major
-			}
-		}
-	}
-
 	var candidates []*Job
+	now := time.Now()
 
 	// Collect all jobs that can start
 	for _, job := range q.jobs {
@@ -162,25 +168,34 @@ func (q *Queue) findJobToStart() *Job {
 			continue
 		}
 
-		// Check major priority constraint: cannot start if there's a running job with higher major priority
-		major := job.Priority / 100
-		if highestRunningMajor > major {
+		wasRunnable := !job.RunnableAt.IsZero()
+		isRunnable := q.isJobRunnable(job)
+
+		if !isRunnable {
+			// Job is not runnable - reset cooldown timer if it was previously runnable
+			if wasRunnable {
+				log.Printf("Job %s (%s) no longer runnable - resetting cooldown", job.ID, job.Name)
+				job.RunnableAt = time.Time{}
+				job.CooldownReadyAt = time.Time{}
+			}
 			continue
 		}
 
-		// Check deduplication constraints
-		if job.Dedup != DedupNone {
-			dedupKey := job.DedupKey()
-			hasRunningDuplicate := false
-			for _, otherJob := range q.jobs {
-				if otherJob.State == JobStateRunning && otherJob.DedupKey() == dedupKey {
-					hasRunningDuplicate = true
-					break
-				}
+		// Job is runnable - set cooldown timer if this is the first time it becomes runnable
+		if !wasRunnable {
+			job.RunnableAt = now
+			if job.Cooldown > 0 {
+				job.CooldownReadyAt = now.Add(job.Cooldown)
+				log.Printf("Job %s (%s) became runnable - cooldown until %v", job.ID, job.Name, job.CooldownReadyAt)
+			} else {
+				job.CooldownReadyAt = now // No cooldown, ready immediately
+				log.Printf("Job %s (%s) became runnable - no cooldown", job.ID, job.Name)
 			}
-			if hasRunningDuplicate {
-				continue
-			}
+		}
+
+		// Check if cooldown has expired
+		if now.Before(job.CooldownReadyAt) {
+			continue // Still in cooldown
 		}
 
 		candidates = append(candidates, job)
@@ -199,6 +214,65 @@ func (q *Queue) findJobToStart() *Job {
 	})
 
 	return candidates[0]
+}
+
+// isJobRunnable checks if a job is currently runnable (passes all constraints except cooldown)
+// Must be called with the mutex locked
+func (q *Queue) isJobRunnable(job *Job) bool {
+	// Find the highest major priority among running jobs
+	highestRunningMajor := math.MinInt
+	for _, runningJob := range q.jobs {
+		if runningJob.State == JobStateRunning {
+			major := runningJob.Priority / 100
+			if major > highestRunningMajor {
+				highestRunningMajor = major
+			}
+		}
+	}
+
+	// Check major priority constraint: cannot start if there's a running job with higher major priority
+	major := job.Priority / 100
+	if highestRunningMajor > major {
+		return false
+	}
+
+	// Check deduplication constraints
+	if job.Dedup != DedupNone {
+		dedupKey := job.DedupKey()
+		for _, otherJob := range q.jobs {
+			if otherJob.State == JobStateRunning && otherJob.DedupKey() == dedupKey {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// findNextCooldownExpiry finds the earliest time when a job in cooldown will become ready
+func (q *Queue) findNextCooldownExpiry() time.Time {
+	var earliest time.Time
+	now := time.Now()
+
+	for _, job := range q.jobs {
+		if job.State != JobStateQueued {
+			continue
+		}
+
+		// Skip jobs that aren't runnable or don't have a cooldown ready time set
+		if job.CooldownReadyAt.IsZero() {
+			continue
+		}
+
+		// Only consider jobs that are still in cooldown
+		if job.CooldownReadyAt.After(now) {
+			if earliest.IsZero() || job.CooldownReadyAt.Before(earliest) {
+				earliest = job.CooldownReadyAt
+			}
+		}
+	}
+
+	return earliest
 }
 
 // countJobsByState counts jobs in a specific state
