@@ -196,9 +196,17 @@ func parseMeta(content string) (*Meta, error) {
 	for _, line := range strings.Split(content, "\n") {
 		lineNum++
 
+		// Skip hashbang and empty lines.
+		if strings.HasPrefix(line, "#!") || strings.TrimSpace(line) == "" {
+			continue
+		}
+
 		directiveStr, ok := strings.CutPrefix(line, "##")
 		if !ok {
-			continue
+			// stop as soon as we find a non-metadata line.
+			// This prevents parsing as metadata lines in the script that start with ##
+			// such as markdown headings.
+			break
 		}
 
 		directive, err := parseDirective(directiveStr)
