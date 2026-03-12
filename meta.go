@@ -141,6 +141,7 @@ const (
 	DedupNone    DedupMode = iota // No deduplication
 	DedupDequeue                  // Remove queued duplicates, wait for running duplicates
 	DedupKill                     // Remove queued duplicates and kill running duplicates
+	DedupOwn                      // Only run this job when no other jobs are running
 )
 
 func (d DedupMode) String() string {
@@ -151,6 +152,8 @@ func (d DedupMode) String() string {
 		return "dequeue"
 	case DedupKill:
 		return "kill"
+	case DedupOwn:
+		return "own"
 	default:
 		return "none"
 	}
@@ -165,6 +168,8 @@ func ParseDedupMode(s string) (DedupMode, error) {
 		return DedupDequeue, nil
 	case "kill":
 		return DedupKill, nil
+	case "own":
+		return DedupOwn, nil
 	default:
 		return DedupNone, fmt.Errorf("invalid dedup mode: %s", s)
 	}
