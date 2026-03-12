@@ -321,21 +321,24 @@ func (s *Service) HandleJobLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleWebhook(r *http.Request) error {
+	log.Printf("[webhook] Received webhook: %s", github.WebHookType(r))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	payload, err := github.ValidatePayload(r, []byte(s.config.Github.WebhookSecret))
 	defer r.Body.Close()
 	if err != nil {
-		log.Printf("error validating request body: err=%s\n", err)
+		log.Printf("[webhook] error validating request body: err=%s\n", err)
 		return nil
 	}
+	log.Printf("[webhook] Payload validated successfully")
 
 	installationID, err := parseEventInstallationID(payload)
 	if err != nil {
-		log.Printf("could not get installation id from webhook: err=%s\n", err)
+		log.Printf("[webhook] could not get installation id from webhook: err=%s\n", err)
 		return nil
 	}
+	log.Printf("[webhook] Installation ID: %d", installationID)
 	gh, err := s.githubClient(installationID)
 	if err != nil {
 		return err
@@ -343,16 +346,18 @@ func (s *Service) handleWebhook(r *http.Request) error {
 
 	ee, err := github.ParseWebHook(github.WebHookType(r), payload)
 	if err != nil {
-		log.Printf("could not parse webhook: err=%s\n", err)
+		log.Printf("[webhook] could not parse webhook: err=%s\n", err)
 		return nil
 	}
+	log.Printf("[webhook] Parsed event type: %T", ee)
 
 	var events []*Event
 	switch e := ee.(type) {
 	case *github.PushEvent:
+		log.Printf("[webhook] Processing PushEvent: repo=%s, ref=%s", *e.Repo.FullName, *e.Ref)
 		branch, ok := strings.CutPrefix(*e.Ref, "refs/heads/")
 		if !ok {
-			log.Printf("unknown ref '%s'", *e.Ref)
+			log.Printf("[webhook] unknown ref '%s', skipping", *e.Ref)
 			return nil
 		}
 
@@ -364,9 +369,11 @@ func (s *Service) handleWebhook(r *http.Request) error {
 
 		if e.HeadCommit == nil {
 			// this is a branch deletion.
+			log.Printf("[webhook] Branch deletion detected, skipping")
 			return nil
 		}
 
+		log.Printf("[webhook] Creating push event: branch=%s, sha=%s", branch, *e.HeadCommit.ID)
 		events = append(events, &Event{
 			Event: "push",
 			Attributes: map[string]string{
@@ -382,8 +389,10 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			Trusted: true,
 		})
 	case *github.PullRequestEvent:
+		log.Printf("[webhook] Processing PullRequestEvent: repo=%s, action=%s, pr=#%d", *e.Repo.FullName, *e.Action, *e.PullRequest.Number)
 		switch *e.Action {
 		case "opened", "synchronize":
+			log.Printf("[webhook] Creating pull_request event: pr=#%d, sha=%s, trusted=%v", *e.PullRequest.Number, *e.PullRequest.Head.SHA, isPRTrusted(e.Repo, e.PullRequest))
 			events = append(events, &Event{
 				Event: "pull_request",
 				Attributes: map[string]string{
@@ -418,18 +427,23 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			})
 		}
 	case *github.IssueCommentEvent:
+		log.Printf("[webhook] Processing IssueCommentEvent: repo=%s, action=%s, issue=#%d", *e.Repo.FullName, *e.Action, *e.Issue.Number)
 		if *e.Action == "created" {
 			err := s.handleCommands(ctx, gh, &events, e)
 			if err != nil {
-				log.Printf("failed handling commands: %v", err)
+				log.Printf("[webhook] failed handling commands: %v", err)
 			}
 		}
+	default:
+		log.Printf("[webhook] Unhandled event type: %T", ee)
 	}
 
 	if len(events) == 0 {
+		log.Printf("[webhook] No events to process")
 		return nil
 	}
 
+	log.Printf("[webhook] Processing %d event(s)", len(events))
 	var allJobs []*Job
 	for _, event := range events {
 		if event.CloneURL == "" {
@@ -439,14 +453,21 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			event.Attributes = map[string]string{}
 		}
 
+		log.Printf("[webhook] Handling event: type=%s, sha=%s, repo=%s", event.Event, event.SHA, *event.Repo.FullName)
 		jobs, err := s.handleEvent(ctx, gh, event)
 		if err != nil {
+			log.Printf("[webhook] Error handling event: %v", err)
 			return err
+		}
+		log.Printf("[webhook] Created %d job(s) from event", len(jobs))
+		for _, job := range jobs {
+			log.Printf("[webhook]   - Job: id=%s, name=%s, priority=%d, dedup=%s", job.ID, job.Name, job.Priority, job.Dedup)
 		}
 		allJobs = append(allJobs, jobs...)
 	}
 
 	// Enqueue all jobs atomically to prevent priority starvation
+	log.Printf("[webhook] Enqueueing %d total job(s)", len(allJobs))
 	s.queue.enqueueJobs(allJobs, s)
 
 	return nil
