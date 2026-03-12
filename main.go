@@ -5,9 +5,11 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/namespaces"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,7 +81,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, subdir := range []string{"logs", "fifo", "cache"} {
+	for _, subdir := range []string{"logs", "fifo", "cache", "jobs"} {
 		err = os.MkdirAll(filepath.Join(config.DataDir, subdir), 0700)
 		if err != nil {
 			log.Fatal(err)
@@ -102,6 +104,8 @@ func main() {
 		cgroup:     cgroup,
 	}
 
+	s.cleanupStale()
+
 	// Start the scheduler
 	log.Printf("Starting job scheduler with max concurrency: %d", config.MaxConcurrency)
 	go s.schedulerRun()
@@ -113,6 +117,48 @@ func main() {
 	go s.cacheGCRun()
 
 	s.serverRun()
+}
+
+func (s *Service) cleanupStale() {
+	// List stale job dirs
+	jobsDir := filepath.Join(s.config.DataDir, "jobs")
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		log.Printf("cleanupStale: failed to read jobs dir: %v", err)
+		entries = nil
+	}
+	var staleJobDirs []string
+	for _, e := range entries {
+		staleJobDirs = append(staleJobDirs, filepath.Join(jobsDir, e.Name()))
+	}
+
+	// List stale containers
+	ctx := namespaces.WithNamespace(context.Background(), "bender")
+	containers, err := s.containerd.Containers(ctx)
+	if err != nil {
+		log.Printf("cleanupStale: failed to list containers: %v", err)
+		containers = nil
+	}
+
+	if len(staleJobDirs) == 0 && len(containers) == 0 {
+		return
+	}
+	log.Printf("cleanupStale: %d stale job dirs, %d stale containers", len(staleJobDirs), len(containers))
+
+	go func() {
+		for _, dir := range staleJobDirs {
+			log.Printf("cleanupStale: deleting stale job dir: %s", dir)
+			if err := exec.Command("btrfs", "subvolume", "delete", dir).Run(); err != nil {
+				log.Printf("cleanupStale: failed to delete job dir %s: %v", dir, err)
+			}
+		}
+		for _, c := range containers {
+			log.Printf("cleanupStale: deleting stale container: %s", c.ID())
+			if err := c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
+				log.Printf("cleanupStale: failed to delete container %s: %v", c.ID(), err)
+			}
+		}
+	}()
 }
 
 func (s Service) schedulerRun() {
