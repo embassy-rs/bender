@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -212,11 +213,11 @@ func (s *Service) runJobInner(ctx context.Context, job *Job, gh *github.Client, 
 
 	log.Println("creating container")
 
-	// Create job dir
+	// Create job dir as btrfs subvolume
 	jobDir := filepath.Join(s.config.DataDir, "jobs", job.ID)
-	err = os.MkdirAll(jobDir, 0700)
+	err = exec.Command("btrfs", "subvolume", "create", jobDir).Run()
 	if err != nil {
-		return err
+		return fmt.Errorf("btrfs subvolume create: %w", err)
 	}
 	home := filepath.Join(jobDir, "home")
 	err = os.MkdirAll(home, 0700)
@@ -225,7 +226,7 @@ func (s *Service) runJobInner(ctx context.Context, job *Job, gh *github.Client, 
 	}
 	defer func() {
 		log.Printf("deleting job dir: %s", jobDir)
-		err := os.RemoveAll(jobDir)
+		err := exec.Command("btrfs", "subvolume", "delete", jobDir).Run()
 		if err != nil {
 			log.Printf("error deleting job dir: %v", err)
 		}
