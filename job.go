@@ -483,9 +483,11 @@ detachedHead = false
 		log.Printf("failed to remove symlinks in artifact dir: %v", err)
 	} else {
 		artifactsDir := filepath.Join(s.config.DataDir, "artifacts", job.ID)
-		err = os.Rename(jobArtifactsDir, artifactsDir)
+		// Use "mv" instead of os.Rename because btrfs subvolumes are separate filesystems,
+		// so os.Rename fails with "invalid cross-device link".
+		err = doExec("mv", jobArtifactsDir, artifactsDir)
 		if err != nil {
-			log.Printf("failed to rename artifact dir: %v", err)
+			log.Printf("failed to move artifact dir: %v", err)
 		}
 	}
 
