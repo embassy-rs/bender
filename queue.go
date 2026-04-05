@@ -77,6 +77,30 @@ func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 
+	// Kill existing jobs with own deduplication
+	for _, job := range q.jobs {
+		if job.Dedup == DedupOwn && job.State == JobStateRunning {
+			log.Printf("Killing running job %s due to own deduplication", job.ID)
+
+			// Re-enqueue job and let the existing deduplication handle it
+			jobs = append(jobs, &Job{
+				Event:           job.Event,
+				ID:              makeJobID(),
+				Name:            job.Name,
+				Priority:        job.Priority,
+				Dedup:           job.Dedup,
+				Cooldown:        job.Cooldown,
+				Script:          job.Script,
+				Permissions:     job.Permissions,
+				PermissionRepos: job.PermissionRepos,
+				EnqueuedAt:      now,
+				State:           JobStateQueued,
+			})
+
+			job.Cancel()
+		}
+	}
+
 	// Handle deduplication for all jobs
 	for _, job := range jobs {
 		if job.Dedup != DedupNone {
