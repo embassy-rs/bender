@@ -75,6 +75,7 @@ type Job struct {
 	Script          string            `json:"-"`
 	Permissions     map[string]string `json:"-"`
 	PermissionRepos []string          `json:"-"`
+	Devices         []MetaDevice      `json:"-"` // Host devices to expose inside the container
 
 	// Internal fields for job management
 	State           JobState           `json:"-"` // Current state of the job
@@ -401,22 +402,33 @@ detachedHead = false
 
 	jobName := fmt.Sprintf("job-%s", job.ID)
 
+	specOpts := []oci.SpecOpts{
+		oci.WithProcessArgs("/bin/bash", "-c", "./entrypoint.sh 2>&1"),
+		oci.WithProcessCwd("/ci"),
+		oci.WithUIDGID(1000, 1000),
+		oci.WithDefaultPathEnv,
+		oci.WithEnv(imageConfig.Config.Env),
+		oci.WithEnv([]string{
+			"HOME=/ci",
+			"GITHUB_TOKEN=" + token,
+		}),
+		oci.WithCgroup(jobCGroup.Path),
+		oci.WithHostNamespace(specs.NetworkNamespace), // TODO network sandboxing
+		oci.WithMounts(mounts),
+	}
+
+	for _, dev := range job.Devices {
+		hostPath, err := filepath.EvalSymlinks(dev.HostPath)
+		if err != nil {
+			return fmt.Errorf("device %q: %w", dev.HostPath, err)
+		}
+		log.Printf("exposing device %s -> %s (%s)", hostPath, dev.ContainerPath, dev.Permissions)
+		specOpts = append(specOpts, oci.WithDevices(hostPath, dev.ContainerPath, dev.Permissions))
+	}
+
 	container, err := s.containerd.NewContainer(ctx, jobName,
 		containerd.WithNewSnapshot(fmt.Sprintf("job-%s-rootfs", job.ID), image),
-		containerd.WithNewSpec(
-			oci.WithProcessArgs("/bin/bash", "-c", "./entrypoint.sh 2>&1"),
-			oci.WithProcessCwd("/ci"),
-			oci.WithUIDGID(1000, 1000),
-			oci.WithDefaultPathEnv,
-			oci.WithEnv(imageConfig.Config.Env),
-			oci.WithEnv([]string{
-				"HOME=/ci",
-				"GITHUB_TOKEN=" + token,
-			}),
-			oci.WithCgroup(jobCGroup.Path),
-			oci.WithHostNamespace(specs.NetworkNamespace), // TODO network sandboxing
-			oci.WithMounts(mounts),
-		),
+		containerd.WithNewSpec(specOpts...),
 	)
 	if err != nil {
 		return err

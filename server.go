@@ -635,6 +635,7 @@ func (s *Service) handleEvent(ctx context.Context, gh *github.Client, event *Eve
 				Script:          *f.Path,
 				Permissions:     meta.Permissions,
 				PermissionRepos: meta.PermissionRepos,
+				Devices:         meta.Devices,
 			})
 		}
 	}

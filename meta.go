@@ -177,6 +177,14 @@ type Meta struct {
 	Cooldown        time.Duration // Cooldown duration before job can start
 	Permissions     map[string]string
 	PermissionRepos []string
+	Devices         []MetaDevice
+}
+
+// MetaDevice describes a host device node to expose inside the job container.
+type MetaDevice struct {
+	HostPath      string // Path on the host. Symlinks (e.g. /dev/serial/by-id/...) are resolved at job launch.
+	ContainerPath string // Path inside the container. Defaults to HostPath if empty.
+	Permissions   string // cgroup device access, e.g. "rwm". Defaults to "rwm" if empty.
 }
 
 type MetaEvent struct {
@@ -190,6 +198,7 @@ func parseMeta(content string) (*Meta, error) {
 		Dedup:           DedupNone, // Default deduplication mode
 		Permissions:     map[string]string{},
 		PermissionRepos: []string{},
+		Devices:         []MetaDevice{},
 	}
 
 	lineNum := 0
@@ -291,6 +300,39 @@ func parseMeta(content string) (*Meta, error) {
 				return nil, errors.Errorf("line %d: 'cooldown' must be a valid duration: %v", lineNum, err)
 			}
 			res.Cooldown = cooldown
+		case "device":
+			if len(directive.Args) < 2 || len(directive.Args) > 4 {
+				return nil, errors.Errorf("line %d: 'device' directive takes 1 to 3 arguments: <host_path> [container_path] [permissions]", lineNum)
+			}
+			if len(directive.Conditions) != 0 {
+				return nil, errors.Errorf("line %d: 'device' directive cannot have conditions", lineNum)
+			}
+
+			dev := MetaDevice{
+				HostPath:    directive.Args[1],
+				Permissions: "rwm",
+			}
+			if len(directive.Args) >= 3 {
+				dev.ContainerPath = directive.Args[2]
+			}
+			if len(directive.Args) == 4 {
+				dev.Permissions = directive.Args[3]
+			}
+			if dev.ContainerPath == "" {
+				dev.ContainerPath = dev.HostPath
+			}
+			if !strings.HasPrefix(dev.HostPath, "/") {
+				return nil, errors.Errorf("line %d: 'device' host path must be absolute, got %q", lineNum, dev.HostPath)
+			}
+			if !strings.HasPrefix(dev.ContainerPath, "/") {
+				return nil, errors.Errorf("line %d: 'device' container path must be absolute, got %q", lineNum, dev.ContainerPath)
+			}
+			for _, c := range dev.Permissions {
+				if c != 'r' && c != 'w' && c != 'm' {
+					return nil, errors.Errorf("line %d: 'device' permissions must contain only 'r', 'w', 'm'; got %q", lineNum, dev.Permissions)
+				}
+			}
+			res.Devices = append(res.Devices, dev)
 		default:
 			return nil, errors.Errorf("line %d: unknown directive '%s'", lineNum, directive.Args[0])
 		}

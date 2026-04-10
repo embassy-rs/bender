@@ -38,6 +38,7 @@ on alalalalalaaaaa
 		Dedup:           DedupNone, // Default dedup mode when not specified
 		Permissions:     map[string]string{},
 		PermissionRepos: []string{},
+		Devices:         []MetaDevice{},
 	}
 
 	got, err := parseMeta(contents)
@@ -213,6 +214,45 @@ func TestDedupModeString(t *testing.T) {
 				t.Errorf("Expected %q for mode %v, got %q", test.expected, test.mode, result)
 			}
 		})
+	}
+}
+
+func TestParseDeviceInMeta(t *testing.T) {
+	contents := `#!/bin/bash
+## on push branch=main
+## device /dev/ttyACM0
+## device /dev/serial/by-id/usb-ZEPHYR_Zephyr_HCI_UART_sample-0.0-if00 /dev/ttyACM1
+## device /dev/ttyACM2 /dev/ttyACM2 rw
+`
+
+	meta, err := parseMeta(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []MetaDevice{
+		{HostPath: "/dev/ttyACM0", ContainerPath: "/dev/ttyACM0", Permissions: "rwm"},
+		{HostPath: "/dev/serial/by-id/usb-ZEPHYR_Zephyr_HCI_UART_sample-0.0-if00", ContainerPath: "/dev/ttyACM1", Permissions: "rwm"},
+		{HostPath: "/dev/ttyACM2", ContainerPath: "/dev/ttyACM2", Permissions: "rw"},
+	}
+	if !reflect.DeepEqual(meta.Devices, want) {
+		t.Fatalf("got %v, want %v", meta.Devices, want)
+	}
+}
+
+func TestParseDeviceErrors(t *testing.T) {
+	cases := []string{
+		"## device\n",                      // no args
+		"## device ttyACM0\n",              // not absolute
+		"## device /dev/ttyACM0 ttyACM0\n", // container path not absolute
+		"## device /dev/ttyACM0 /dev/ttyACM0 rwx\n", // bad permission char
+		"## device /dev/a /dev/b rwm extra\n",       // too many args
+		"## device /dev/ttyACM0 foo=bar\n",          // condition not allowed
+	}
+	for _, c := range cases {
+		if _, err := parseMeta(c); err == nil {
+			t.Errorf("expected error for %q", c)
+		}
 	}
 }
 
