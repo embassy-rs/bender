@@ -16,6 +16,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
+	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
@@ -417,6 +418,7 @@ detachedHead = false
 		oci.WithMounts(mounts),
 	}
 
+	gidSet := map[uint32]struct{}{}
 	for _, dev := range job.Devices {
 		hostPath, err := filepath.EvalSymlinks(dev.HostPath)
 		if err != nil {
@@ -424,6 +426,25 @@ detachedHead = false
 		}
 		log.Printf("exposing device %s -> %s (%s)", hostPath, dev.ContainerPath, dev.Permissions)
 		specOpts = append(specOpts, oci.WithDevices(hostPath, dev.ContainerPath, dev.Permissions))
+
+		// The device node inside the container inherits the host's owner/group/mode
+		// (e.g. root:dialout 0660). Our container process runs as uid 1000, so it
+		// needs the device's group as a supplementary GID to actually open it.
+		var st syscall.Stat_t
+		if err := syscall.Stat(hostPath, &st); err != nil {
+			return fmt.Errorf("stat device %q: %w", hostPath, err)
+		}
+		gidSet[st.Gid] = struct{}{}
+	}
+	if len(gidSet) > 0 {
+		gids := make([]uint32, 0, len(gidSet))
+		for gid := range gidSet {
+			gids = append(gids, gid)
+		}
+		specOpts = append(specOpts, func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
+			s.Process.User.AdditionalGids = append(s.Process.User.AdditionalGids, gids...)
+			return nil
+		})
 	}
 
 	container, err := s.containerd.NewContainer(ctx, jobName,
