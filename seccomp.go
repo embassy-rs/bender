@@ -98,6 +98,7 @@ func ciSeccompProfile(logMode bool) *specs.LinuxSeccomp {
 			"gettimeofday",
 			"getitimer", "setitimer",
 			"timerfd_create", "timerfd_gettime", "timerfd_settime",
+			"timer_create", "timer_settime", "timer_gettime", "timer_getoverrun", "timer_delete",
 
 			// futexes
 			"futex", "futex_waitv",
@@ -157,6 +158,8 @@ func ciSeccompProfile(logMode bool) *specs.LinuxSeccomp {
 			// identity
 			"getuid", "geteuid", "getgid", "getegid", "getgroups",
 			"getresuid", "getresgid",
+			"setresuid", "setresgid", // make uses to drop setgid before running recipes
+			"setuid", "setgid",       // no-ops under NNP for unprivileged uid
 			"getsid", "getpgid", "getpgrp", "setpgid", "setsid",
 
 			// limits / info
