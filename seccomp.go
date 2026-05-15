@@ -33,6 +33,30 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 		}
 	}
 
+	prctlAllow := func(op int) specs.LinuxSyscall {
+		return specs.LinuxSyscall{
+			Names:  []string{"prctl"},
+			Action: specs.ActAllow,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 0,
+				Value: uint64(op),
+				Op:    specs.OpEqualTo,
+			}},
+		}
+	}
+
+	ioctlAllow := func(cmd uint64) specs.LinuxSyscall {
+		return specs.LinuxSyscall{
+			Names:  []string{"ioctl"},
+			Action: specs.ActAllow,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 1,
+				Value: cmd,
+				Op:    specs.OpEqualTo,
+			}},
+		}
+	}
+
 	syscalls := []specs.LinuxSyscall{
 		allow(
 			// process / thread lifecycle
@@ -42,7 +66,7 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 			"wait4", "waitid",
 			"getpid", "getppid", "gettid",
 			"set_tid_address", "set_robust_list", "get_robust_list",
-			"prctl", "arch_prctl",
+			"arch_prctl",
 			"capget",
 			"getrandom",
 			"rseq",
@@ -53,7 +77,7 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 			"rt_sigpending", "rt_sigsuspend", "rt_sigtimedwait",
 			"rt_sigqueueinfo", "rt_tgsigqueueinfo",
 			"sigaltstack",
-			"pidfd_open", "pidfd_send_signal",
+			"pidfd_send_signal",
 			"restart_syscall",
 			"signalfd4",
 
@@ -140,11 +164,8 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 			"sendmmsg", "recvmmsg",
 			"shutdown",
 			"getsockname", "getpeername",
-			"getsockopt", "setsockopt",
+			"getsockopt",
 			"socketpair",
-
-			// ioctl is unavoidable — used for terminal sizing, etc.
-			"ioctl",
 		),
 
 		// clone, but only without new namespaces (no unshare-via-clone)
@@ -166,6 +187,29 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 			ErrnoRet: &nosys,
 		},
 
+		// Deny SOCK_RAW (and SOCK_PACKET=10) before the per-family allows
+		// below. Cargo/git never open raw sockets. Mask 0xF strips the
+		// SOCK_CLOEXEC / SOCK_NONBLOCK flag bits.
+		{
+			Names:  []string{"socket"},
+			Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{{
+				Index:    1,
+				Value:    0xF,
+				ValueTwo: unix.SOCK_RAW,
+				Op:       specs.OpMaskedEqual,
+			}},
+		},
+		{
+			Names:  []string{"socket"},
+			Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{{
+				Index:    1,
+				Value:    0xF,
+				ValueTwo: 10, // SOCK_PACKET (obsolete but kernel still accepts it)
+				Op:       specs.OpMaskedEqual,
+			}},
+		},
 		// socket, restricted to common address families. AF_INET/INET6 for
 		// HTTPS to crates.io/github (gated further by the bender net sandbox),
 		// AF_UNIX for local IPC, AF_NETLINK for getaddrinfo.
@@ -205,6 +249,105 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 				Op:    specs.OpEqualTo,
 			}},
 		},
+
+		// prctl: allowlist the handful of ops glibc + cargo/git need.
+		// Block PR_SET_MM (LPE historically), PR_SET_SECCOMP (could install
+		// a permissive filter; no-op under NNP but block anyway),
+		// PR_SET_SPECULATION_CTRL, PR_SET_SECUREBITS, PR_SCHED_CORE, etc.
+		prctlAllow(unix.PR_SET_PDEATHSIG),
+		prctlAllow(unix.PR_GET_PDEATHSIG),
+		prctlAllow(unix.PR_GET_DUMPABLE),
+		prctlAllow(unix.PR_SET_DUMPABLE),
+		prctlAllow(unix.PR_GET_KEEPCAPS),
+		prctlAllow(unix.PR_SET_KEEPCAPS),
+		prctlAllow(unix.PR_GET_NAME),
+		prctlAllow(unix.PR_SET_NAME),
+		prctlAllow(unix.PR_GET_NO_NEW_PRIVS),
+		prctlAllow(unix.PR_SET_NO_NEW_PRIVS),
+		prctlAllow(unix.PR_CAP_AMBIENT),
+
+		// setsockopt: deny netlink and packet sockets' setsockopt entirely.
+		// These have been the source of multiple kernel heap-overflow CVEs
+		// (CVE-2021-22555, CVE-2022-25636, etc.). Git/cargo only setsockopt
+		// on TCP/UDP/UNIX sockets.
+		{
+			Names:  []string{"setsockopt"},
+			Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 1,
+				Value: unix.SOL_NETLINK,
+				Op:    specs.OpEqualTo,
+			}},
+		},
+		{
+			Names:  []string{"setsockopt"},
+			Action: specs.ActErrno,
+			Args: []specs.LinuxSeccompArg{{
+				Index: 1,
+				Value: unix.SOL_PACKET,
+				Op:    specs.OpEqualTo,
+			}},
+		},
+		allow("setsockopt"),
+
+		// ioctl: explicit allowlist of commands actually used by CI tooling.
+		// Anything not listed falls through to the default-deny. Goal is
+		// defense against future, not-yet-known ioctl-reachable kernel bugs.
+		//
+		// Notable cmds intentionally *not* allowed: TIOCSTI (TTY injection),
+		// TIOCLINUX, TIOCSETD (line-discipline swap), TIOCCONS, VT_*, KD*,
+		// BLK*, LOOP_*, DM_*, NS_GET_*, BTRFS_IOC_*, SIOCS*. If a build
+		// trips on EPERM from ioctl, strace will name the cmd; add it here.
+
+		/*
+			// termios — get/set terminal attributes (every readline/curses user)
+			ioctlAllow(0x5401), // TCGETS
+			ioctlAllow(0x5402), // TCSETS
+			ioctlAllow(0x5403), // TCSETSW
+			ioctlAllow(0x5404), // TCSETSF
+			ioctlAllow(0x5405), // TCGETA
+			ioctlAllow(0x5406), // TCSETA
+			ioctlAllow(0x5407), // TCSETAW
+			ioctlAllow(0x5408), // TCSETAF
+			ioctlAllow(0x5409), // TCSBRK
+			ioctlAllow(0x540A), // TCXONC
+			ioctlAllow(0x540B), // TCFLSH
+
+			// TTY misc — window size, session, fg pgrp, pty allocation
+			ioctlAllow(0x540C), // TIOCEXCL
+			ioctlAllow(0x540D), // TIOCNXCL
+			ioctlAllow(0x540E), // TIOCSCTTY
+			ioctlAllow(0x540F), // TIOCGPGRP
+			ioctlAllow(0x5410), // TIOCSPGRP
+			ioctlAllow(0x5411), // TIOCOUTQ
+			ioctlAllow(0x5413), // TIOCGWINSZ
+			ioctlAllow(0x5414), // TIOCSWINSZ
+			ioctlAllow(0x5422), // TIOCNOTTY
+			ioctlAllow(0x5424), // TIOCGETD     (note: SETD intentionally not allowed)
+			ioctlAllow(0x5429), // TIOCGSID
+			ioctlAllow(0x80045430), // TIOCGPTN
+			ioctlAllow(0x40045431), // TIOCSPTLCK
+			ioctlAllow(0x5441),     // TIOCGPTPEER
+		*/
+
+		// FD/file generic — glibc & stdlib internals
+		ioctlAllow(0x541B), // FIONREAD / TIOCINQ
+		ioctlAllow(0x5421), // FIONBIO
+		ioctlAllow(0x5450), // FIONCLEX
+		ioctlAllow(0x5451), // FIOCLEX
+		ioctlAllow(0x5452), // FIOASYNC
+
+		// filesystem — reflink, chattr, fiemap (cargo, cp --reflink, tar)
+		ioctlAllow(0x40049409), // FICLONE
+		ioctlAllow(0x4020940D), // FICLONERANGE
+		ioctlAllow(0xC0189436), // FIDEDUPERANGE
+		ioctlAllow(0x80086601), // FS_IOC_GETFLAGS
+		ioctlAllow(0x40086602), // FS_IOC_SETFLAGS
+		ioctlAllow(0x80087601), // FS_IOC_GETVERSION
+		ioctlAllow(0x40087602), // FS_IOC_SETVERSION
+		ioctlAllow(0xC020660B), // FS_IOC_FIEMAP
+		ioctlAllow(0x801C581F), // FS_IOC_FSGETXATTR
+		ioctlAllow(0x401C581E), // FS_IOC_FSSETXATTR
 	}
 
 	return &specs.LinuxSeccomp{
