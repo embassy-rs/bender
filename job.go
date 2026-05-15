@@ -416,6 +416,9 @@ detachedHead = false
 			oci.WithCgroup(jobCGroup.Path),
 			oci.WithHostNamespace(specs.NetworkNamespace), // TODO network sandboxing
 			oci.WithMounts(mounts),
+			oci.WithCapabilities(nil),
+			oci.WithNoNewPrivileges,
+			withSeccomp(),
 		),
 	)
 	if err != nil {
