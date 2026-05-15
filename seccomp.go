@@ -16,14 +16,20 @@ import (
 //
 // Only the native x86_64 ABI is permitted; x86 and x32 syscalls return ENOSYS,
 // which closes the "use the 32-bit ABI to bypass the filter" escape route.
-func withSeccomp() oci.SpecOpts {
+func withSeccomp(logMode bool) oci.SpecOpts {
 	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
-		s.Linux.Seccomp = ciSeccompProfile()
+		s.Linux.Seccomp = ciSeccompProfile(logMode)
 		return nil
 	}
 }
 
-func ciSeccompProfile() *specs.LinuxSeccomp {
+// In logMode the default action is SCMP_ACT_LOG: every syscall that would
+// otherwise be denied is instead *allowed* and logged via the kernel audit
+// subsystem (visible in `dmesg` or `ausearch -k seccomp`). Use this to
+// diagnose "Operation not permitted" failures by collecting the list of
+// syscalls a build actually wants, then turn logMode off and add them to
+// the allowlist.
+func ciSeccompProfile(logMode bool) *specs.LinuxSeccomp {
 	nosys := uint(unix.ENOSYS)
 
 	allow := func(names ...string) specs.LinuxSyscall {
@@ -350,8 +356,13 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 		ioctlAllow(0x401C581E), // FS_IOC_FSSETXATTR
 	}
 
+	defaultAction := specs.ActErrno
+	if logMode {
+		defaultAction = specs.ActLog
+	}
+
 	return &specs.LinuxSeccomp{
-		DefaultAction: specs.ActErrno,
+		DefaultAction: defaultAction,
 		Architectures: []specs.Arch{specs.ArchX86_64},
 		Syscalls:      syscalls,
 	}

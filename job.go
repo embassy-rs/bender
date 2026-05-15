@@ -418,7 +418,7 @@ detachedHead = false
 			oci.WithMounts(mounts),
 			oci.WithCapabilities(nil),
 			oci.WithNoNewPrivileges,
-			withSeccomp(),
+			withSeccomp(s.config.SeccompLog),
 		),
 	)
 	if err != nil {

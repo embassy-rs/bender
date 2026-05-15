@@ -24,6 +24,7 @@ type Config struct {
 	Image          string            `yaml:"image"`
 	Github         GithubConfig      `yaml:"github"`
 	Cache          CacheConfig       `yaml:"cache"`
+	SeccompLog     bool              `yaml:"seccomp_log"`
 }
 
 type CacheConfig struct {
