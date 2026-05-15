@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/oci"
-	"github.com/google/go-github/v72/github"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/google/go-github/v84/github"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sqlbunny/errors"
@@ -122,7 +122,7 @@ func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, stat
 		*j.Repo.Owner.Login,
 		*j.Repo.Name,
 		j.SHA,
-		&github.RepoStatus{
+		github.RepoStatus{
 			State:       github.Ptr(state),
 			Context:     github.Ptr(fmt.Sprintf("ci/%s", j.Name)),
 			Description: github.Ptr(description),

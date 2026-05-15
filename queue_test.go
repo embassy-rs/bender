@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v72/github"
+	"github.com/google/go-github/v84/github"
 )
 
 func TestSimplifiedJobQueue(t *testing.T) {
