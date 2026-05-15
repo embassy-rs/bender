@@ -137,6 +137,7 @@ func ciSeccompProfile() *specs.LinuxSeccomp {
 			// network (sockets — ranges and address families filtered below)
 			"connect", "bind", "listen", "accept", "accept4",
 			"sendto", "recvfrom", "sendmsg", "recvmsg",
+			"sendmmsg", "recvmmsg",
 			"shutdown",
 			"getsockname", "getpeername",
 			"getsockopt", "setsockopt",
