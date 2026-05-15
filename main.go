@@ -169,7 +169,7 @@ func (s *Service) cleanupStale() {
 		}
 		for _, dir := range staleJobDirs {
 			log.Printf("cleanupStale: deleting stale job dir: %s", dir)
-			cmd := exec.Command("btrfs", "subvolume", "delete", dir)
+			cmd := exec.Command("btrfs", "subvolume", "delete", "-R", dir)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
