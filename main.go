@@ -148,12 +148,6 @@ func (s *Service) cleanupStale() {
 	log.Printf("cleanupStale: %d stale job dirs, %d stale containers", len(staleJobDirs), len(containers))
 
 	go func() {
-		for _, dir := range staleJobDirs {
-			log.Printf("cleanupStale: deleting stale job dir: %s", dir)
-			if err := exec.Command("btrfs", "subvolume", "delete", dir).Run(); err != nil {
-				log.Printf("cleanupStale: failed to delete job dir %s: %v", dir, err)
-			}
-		}
 		for _, c := range containers {
 			log.Printf("cleanupStale: killing stale container: %s", c.ID())
 			if task, err := c.Task(ctx, nil); err == nil {
@@ -171,6 +165,15 @@ func (s *Service) cleanupStale() {
 			}
 			if err := c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
 				log.Printf("cleanupStale: failed to delete container %s: %v", c.ID(), err)
+			}
+		}
+		for _, dir := range staleJobDirs {
+			log.Printf("cleanupStale: deleting stale job dir: %s", dir)
+			cmd := exec.Command("btrfs", "subvolume", "delete", dir)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				log.Printf("cleanupStale: failed to delete job dir %s: %v", dir, err)
 			}
 		}
 	}()
