@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -153,7 +155,20 @@ func (s *Service) cleanupStale() {
 			}
 		}
 		for _, c := range containers {
-			log.Printf("cleanupStale: deleting stale container: %s", c.ID())
+			log.Printf("cleanupStale: killing stale container: %s", c.ID())
+			if task, err := c.Task(ctx, nil); err == nil {
+				if err := task.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+					log.Printf("cleanupStale: failed to kill task for %s: %v", c.ID(), err)
+				}
+				if statusC, err := task.Wait(ctx); err == nil {
+					<-statusC
+				}
+				if _, err := task.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+					log.Printf("cleanupStale: failed to delete task for %s: %v", c.ID(), err)
+				}
+			} else if !errdefs.IsNotFound(err) {
+				log.Printf("cleanupStale: failed to load task for %s: %v", c.ID(), err)
+			}
 			if err := c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
 				log.Printf("cleanupStale: failed to delete container %s: %v", c.ID(), err)
 			}
