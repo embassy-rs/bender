@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,21 +80,48 @@ func initCgroup() CgroupManager {
 		jobs:       filepath.Join(root, "jobs"),
 	}
 
-	// create sub-cgroups
+	// enableControllers enables the memory/cpu/pids controllers in a cgroup's
+	// subtree_control so they're available to its children. Writing a controller
+	// file (e.g. memory.oom.group) in a job cgroup requires the controller to be
+	// enabled in cgroup.subtree_control of every ancestor. systemd delegates the
+	// controllers to us (Delegate=memory cpu pids in the unit), but we must
+	// propagate them down ourselves.
+	//
+	// Note: the kernel's "no internal process" rule forbids enabling
+	// subtree_control on a cgroup that has processes directly in it, so the
+	// caller must move our own process into a leaf cgroup before enabling
+	// controllers on an ancestor.
+	enableControllers := func(cgPath string) {
+		err := os.WriteFile(filepath.Join(cgPath, "cgroup.subtree_control"), []byte("+memory +cpu +pids"), 0644)
+		if err != nil {
+			log.Printf("Warning: failed to enable controllers in %s: %v", cgPath, err)
+		}
+	}
+
+	// create the bender sub-cgroup and move ourselves into it first, so that
+	// the delegation root has no internal processes and we can enable
+	// controllers on it below.
 	err = os.Mkdir(filepath.Join(cg.mountpoint, cg.bender), 0777)
 	if err != nil && !os.IsExist(err) {
 		panic(err)
 	}
-	err = os.Mkdir(filepath.Join(cg.mountpoint, cg.jobs), 0777)
-	if err != nil && !os.IsExist(err) {
-		panic(err)
-	}
-
-	// move ourselves to the bender cgroup.
 	err = os.WriteFile(filepath.Join(cg.mountpoint, cg.bender, "cgroup.procs"), []byte(fmt.Sprint(os.Getpid())), 0777)
 	if err != nil {
 		panic(err)
 	}
+
+	// Now that the delegation root is empty of processes, enable controllers in
+	// its subtree_control. This makes the controllers available to the jobs
+	// sub-cgroup created below.
+	enableControllers(filepath.Join(cg.mountpoint, cg.root))
+
+	// create the jobs sub-cgroup and enable controllers in it so per-job cgroups
+	// get the controller interface files (memory.*, cpu.*, pids.*).
+	err = os.Mkdir(filepath.Join(cg.mountpoint, cg.jobs), 0777)
+	if err != nil && !os.IsExist(err) {
+		panic(err)
+	}
+	enableControllers(filepath.Join(cg.mountpoint, cg.jobs))
 
 	return cg
 }

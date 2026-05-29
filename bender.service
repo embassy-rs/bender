@@ -14,7 +14,7 @@ AmbientCapabilities=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_RAW
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
-Delegate=yes
+Delegate=memory cpu pids
 
 CPUAccounting=yes
 
