@@ -408,8 +408,22 @@ detachedHead = false
 		return err
 	}
 
-	err = jobCGroup.SetValue("memory.oom.group", "1")
-	if err != nil {
+	// Set a per-job memory limit with no swap. This is what makes
+	// memory.oom.group actually do its job: memory.oom.group only triggers a
+	// group-kill on a *cgroup-level* OOM, i.e. when this cgroup hits its own
+	// memory.max. Without a per-job memory.max, a runaway job instead spills
+	// into swap and/or trips the global OOM killer, which kills a single
+	// process (ignoring oom.group) and can take down the whole host. With a
+	// per-job limit + swap disabled, exceeding it triggers an immediate cgroup
+	// OOM on this exact cgroup, and oom.group=1 kills the whole job tree
+	// atomically.
+	if err := jobCGroup.SetValue("memory.swap.max", s.config.MemorySwapMax); err != nil {
+		log.Printf("Warning: failed to set memory.swap.max=%s for job %s: %v", s.config.MemorySwapMax, job.ID, err)
+	}
+	if err := jobCGroup.SetValue("memory.max", s.config.MemoryMax); err != nil {
+		log.Printf("Warning: failed to set memory.max=%s for job %s: %v", s.config.MemoryMax, job.ID, err)
+	}
+	if err := jobCGroup.SetValue("memory.oom.group", "1"); err != nil {
 		log.Printf("Warning: failed to set memory.oom.group=1 for job %s: %v", job.ID, err)
 		// Don't fail the job if we can't set this - it's not critical
 	}

@@ -25,6 +25,11 @@ type Config struct {
 	Github         GithubConfig      `yaml:"github"`
 	Cache          CacheConfig       `yaml:"cache"`
 	SeccompLog     bool              `yaml:"seccomp_log"`
+	// Per-job memory limits, in cgroup v2 syntax (e.g. "12G", or "max" for
+	// unlimited). When a job exceeds memory_max RAM + memory_swap_max swap, it
+	// gets OOM-killed as a group (memory.oom.group=1).
+	MemoryMax     string `yaml:"memory_max"`
+	MemorySwapMax string `yaml:"memory_swap_max"`
 }
 
 type CacheConfig struct {
@@ -65,6 +70,8 @@ func main() {
 			MinFreeSpaceMB: 20 * 1024, // 20gb
 			MaxSizeMB:      40 * 1024, // 40gb
 		},
+		MemoryMax:     "12G",
+		MemorySwapMax: "2G",
 	}
 	err = yaml.Unmarshal(configData, &config)
 	if err != nil {
