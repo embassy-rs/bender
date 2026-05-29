@@ -15,6 +15,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -24,6 +25,20 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sqlbunny/errors"
 )
+
+// withOOMScoreAdj sets the process oom_score_adj. A positive value makes the
+// job's processes the preferred victims of the kernel's global (system-wide)
+// OOM killer, so that when the whole host runs out of memory, job processes are
+// killed before bender or other system services.
+func withOOMScoreAdj(adj int) oci.SpecOpts {
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		if s.Process == nil {
+			s.Process = &specs.Process{}
+		}
+		s.Process.OOMScoreAdj = &adj
+		return nil
+	}
+}
 
 type Event struct {
 	Event      string            `json:"event"`
@@ -418,6 +433,7 @@ detachedHead = false
 			oci.WithMounts(mounts),
 			oci.WithCapabilities(nil),
 			oci.WithNoNewPrivileges,
+			withOOMScoreAdj(1000), // make jobs the preferred victims of the global OOM killer
 			withSeccomp(s.config.SeccompLog),
 		),
 	)

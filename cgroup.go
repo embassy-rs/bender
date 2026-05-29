@@ -112,8 +112,22 @@ func initCgroup() CgroupManager {
 
 	// Now that the delegation root is empty of processes, enable controllers in
 	// its subtree_control. This makes the controllers available to the jobs
-	// sub-cgroup created below.
+	// sub-cgroup created below, and creates the memory.* interface files in the
+	// bender sub-cgroup (needed for memory.low below).
 	enableControllers(filepath.Join(cg.mountpoint, cg.root))
+
+	// Protect bender's own memory so that when the bender.service MemoryMax is
+	// hit, the OOM killer prefers killing job processes over bender itself.
+	// Under memory pressure the kernel reclaims/kills from cgroups whose usage
+	// exceeds memory.low first; by reserving memory.low for the bender cgroup
+	// and leaving the jobs subtree unprotected (memory.low=0, the default), jobs
+	// become the preferred OOM victims. bender is a lightweight daemon, so a
+	// small reservation is plenty. This must come after enabling the memory
+	// controller in the root's subtree_control, otherwise memory.low won't exist.
+	err = os.WriteFile(filepath.Join(cg.mountpoint, cg.bender, "memory.low"), []byte("512M"), 0644)
+	if err != nil {
+		log.Printf("Warning: failed to set memory.low for bender cgroup: %v", err)
+	}
 
 	// create the jobs sub-cgroup and enable controllers in it so per-job cgroups
 	// get the controller interface files (memory.*, cpu.*, pids.*).
