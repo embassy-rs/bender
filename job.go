@@ -430,6 +430,13 @@ detachedHead = false
 
 	jobName := fmt.Sprintf("job-%s", job.ID)
 
+	// cleanupCtx is used for teardown (kill/delete) so it works even when ctx
+	// has been canceled (e.g. the job was killed by dedup). If we used ctx, the
+	// deferred kill/delete RPCs below would fail instantly with "context
+	// canceled" without ever reaching containerd, leaving the container running
+	// as a phantom that doesn't count against the concurrency limit.
+	cleanupCtx := namespaces.WithNamespace(context.Background(), "bender")
+
 	container, err := s.containerd.NewContainer(ctx, jobName,
 		containerd.WithNewSnapshot(fmt.Sprintf("job-%s-rootfs", job.ID), image),
 		containerd.WithNewSpec(
@@ -454,7 +461,7 @@ detachedHead = false
 	if err != nil {
 		return err
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(cleanupCtx)
 
 	log.Println("creating task")
 
@@ -466,8 +473,30 @@ detachedHead = false
 	if err != nil {
 		return err
 	}
-	defer task.Delete(ctx)
-	defer task.Kill(ctx, syscall.SIGKILL)
+	// Tear the task down on exit. We use cleanupCtx (not ctx) so this still runs
+	// after the job is killed via dedup (which cancels ctx). We must kill, wait
+	// for the task to actually exit, then delete: deleting a still-running task
+	// fails. On the normal exit path the task is already dead, so the kill is a
+	// no-op and the wait returns immediately.
+	defer func() {
+		exitC, err := task.Wait(cleanupCtx)
+		if err != nil {
+			log.Printf("cleanup: task.Wait failed for job %s: %v", job.ID, err)
+		}
+		if err := task.Kill(cleanupCtx, syscall.SIGKILL); err != nil {
+			log.Printf("cleanup: task.Kill failed for job %s: %v", job.ID, err)
+		}
+		if exitC != nil {
+			select {
+			case <-exitC:
+			case <-time.After(30 * time.Second):
+				log.Printf("cleanup: timed out waiting for task to exit for job %s", job.ID)
+			}
+		}
+		if _, err := task.Delete(cleanupCtx); err != nil {
+			log.Printf("cleanup: task.Delete failed for job %s: %v", job.ID, err)
+		}
+	}()
 
 	// the task is now running and has a pid that can be used to setup networking
 	// or other runtime settings outside of containerd
