@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/sqlbunny/errors"
 )
 
@@ -130,6 +130,9 @@ func (s *Service) githubClient(installationID int64) (*github.Client, error) {
 		return nil, err
 	}
 
-	gh := github.NewClient(&http.Client{Transport: itr})
+	gh, err := github.NewClient(github.WithHTTPClient(&http.Client{Transport: itr}))
+	if err != nil {
+		return nil, err
+	}
 	return gh, nil
 }

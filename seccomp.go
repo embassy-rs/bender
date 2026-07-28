@@ -159,7 +159,7 @@ func ciSeccompProfile(logMode bool) *specs.LinuxSeccomp {
 			"getuid", "geteuid", "getgid", "getegid", "getgroups",
 			"getresuid", "getresgid",
 			"setresuid", "setresgid", // make uses to drop setgid before running recipes
-			"setuid", "setgid",       // no-ops under NNP for unprivileged uid
+			"setuid", "setgid", // no-ops under NNP for unprivileged uid
 			"getsid", "getpgid", "getpgrp", "setpgid", "setsid",
 
 			// limits / info

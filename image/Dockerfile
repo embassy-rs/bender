@@ -1,8 +1,25 @@
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 RUN apt-get update && \
-    apt-get install -y git curl wget iproute2 iputils-ping jq strace build-essential python3 libusb-1.0-0 file aha asciidoctor && \
-    apt-get clean
+    apt-get install -y \
+        git \
+        curl \
+        wget \
+        iproute2 \
+        iputils-ping \
+        jq \
+        strace \
+        build-essential \
+        python3 \
+        libusb-1.0-0 \
+        file \
+        aha \
+        asciidoctor \
+        pkg-config \
+        libssl-dev \
+        clang \
+        gcc-arm-none-eabi \
+    && apt-get clean
 
 RUN \
     gem install asciidoctor-multipage
@@ -22,19 +39,13 @@ RUN \
     ln -s /usr/bin/rustup /usr/bin/rustfmt
 
 RUN \
-    curl -L -o /usr/bin/kubectl https://dl.k8s.io/release/v1.27.2/bin/linux/amd64/kubectl && \
+    curl -L -o /usr/bin/kubectl https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl && \
     chmod +x /usr/bin/kubectl
 
 RUN \
-    curl -L -o gh.tar.gz https://github.com/cli/cli/releases/download/v2.34.0/gh_2.34.0_linux_amd64.tar.gz && \
+    curl -L -o gh.tar.gz https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz && \
     tar xzvf gh.tar.gz && \
-    cp gh_2.34.0_linux_amd64/bin/gh /usr/bin && \
-    rm -rf gh_2.34.0_linux_amd64 gh.tar.gz
-
-#RUN \
-#    curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.5.0/sccache-v0.5.0-x86_64-unknown-linux-musl.tar.gz && \
-#    tar xzvf sccache.tar.gz && \
-#    cp sccache-v0.5.0-x86_64-unknown-linux-musl/sccache /usr/bin && \
-#    rm -rf sccache-v0.5.0-x86_64-unknown-linux-musl sccache.tar.gz
+    cp gh_2.96.0_linux_amd64/bin/gh /usr/bin && \
+    rm -rf gh_2.96.0_linux_amd64 gh.tar.gz
 
 COPY bin/* /usr/bin/
