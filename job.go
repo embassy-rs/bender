@@ -179,14 +179,20 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 		return s.runJobInner(jobCtx, job, gh, logs)
 	})
 
+	duration := formatDuration(time.Since(job.StartedAt))
+
 	result := "success"
-	description := "Job completed successfully"
+	description := fmt.Sprintf("Completed in %s", duration)
 	if err != nil {
 		fmt.Fprintf(logs, "run failed: %v\n", err)
 		log.Printf("job run failed: %v", err)
 		result = "failure"
-		description = fmt.Sprintf("Job failed: %v", err)
+		// The duration goes before the error: GitHub truncates status
+		// descriptions at 140 chars and the error can be arbitrarily long.
+		description = fmt.Sprintf("Failed in %s: %v", duration, err)
 	}
+
+	fmt.Fprintf(logs, "job %s in %s\n", result, duration)
 
 	err = s.setStatus(ctx, gh, job, result, description)
 	if err != nil {

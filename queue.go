@@ -291,7 +291,7 @@ func (q *Queue) onJobFinished(job *Job) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 
-	log.Printf("Finished job %s (%s)", job.ID, job.Name)
+	log.Printf("Finished job %s (%s) in %s", job.ID, job.Name, formatDuration(time.Since(job.StartedAt)))
 
 	// Remove the job from the list
 	q.removeJobUnsafe(job.ID)

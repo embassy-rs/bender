@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
@@ -35,6 +36,16 @@ func doExec(cmd string, args ...string) error {
 		return errors.Errorf("Failed to execute command: %w", err)
 	}
 	return nil
+}
+
+// formatDuration renders a job duration for humans: sub-second durations keep
+// millisecond precision, longer ones are rounded to whole seconds so they read
+// as "1m23s" rather than "1m23.456789s".
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }
 
 func nopanic(fn func() error) (err error) {
