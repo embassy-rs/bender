@@ -203,6 +203,11 @@ func parseMeta(content string) (*Meta, error) {
 
 		directiveStr, ok := strings.CutPrefix(line, "##")
 		if !ok {
+			// Plain `#` comments aren't metadata, but they don't end the metadata
+			// block either: scripts commonly interleave comments with directives.
+			if strings.HasPrefix(line, "#") {
+				continue
+			}
 			// stop as soon as we find a non-metadata line.
 			// This prevents parsing as metadata lines in the script that start with ##
 			// such as markdown headings.
