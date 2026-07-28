@@ -96,8 +96,23 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         .queue-pos.empty { color: #ccc; }
         .authbar { float: right; font-size: 0.9em; color: #666; }
         .authbar form { display: inline; }
-        .authbar button, .cancel button { font: inherit; cursor: pointer; }
-        .cancel button { color: #a00; }
+        button {
+            font: inherit;
+            cursor: pointer;
+            padding: 4px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            line-height: 1.4;
+            transition: background-color 0.1s, border-color 0.1s;
+        }
+        button:hover { background: #f2f2f2; border-color: #999; }
+        button:active { background: #e6e6e6; }
+        button:focus-visible { outline: 2px solid #007bff; outline-offset: 1px; }
+        .cancel button { color: #a00; border-color: #e0b4b4; }
+        .cancel button:hover { background: #fdeaea; border-color: #a00; }
+        .cancel button:active { background: #f9d6d6; }
     </style>
 </head>
 <body>
