@@ -368,8 +368,18 @@ func (s *Service) handleWebhook(r *http.Request) error {
 		}
 
 		if e.HeadCommit == nil {
-			// this is a branch deletion.
-			log.Printf("[webhook] Branch deletion detected, skipping")
+			// This is a branch deletion, so jobs for it are pointless now. This
+			// notably happens when a PR is removed from the merge queue: GitHub
+			// deletes the `gh-readonly-queue/...` branch we're testing.
+			log.Printf("[webhook] Branch '%s' deleted, killing its jobs", branch)
+
+			s.queue.killJobs(func(job *Job) bool {
+				// Only push jobs: for pull_request jobs the "branch" attribute is
+				// the *base* branch, which isn't the one being deleted.
+				return job.Event.Event == "push" &&
+					job.Attributes["branch"] == branch &&
+					job.Repo.GetFullName() == e.Repo.GetFullName()
+			})
 			return nil
 		}
 
