@@ -78,10 +78,17 @@ func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
 	defer q.mutex.Unlock()
 
 	// Handle deduplication for all jobs
+	var superseded []*Job
 	for _, job := range jobs {
 		if job.Dedup != DedupNone {
-			q.handleDeduplication(job)
+			superseded = append(superseded, q.handleDeduplication(job)...)
 		}
+	}
+
+	// Report the dropped jobs to GitHub off the mutex: this makes API calls, and
+	// the scheduler is waiting on this lock.
+	if len(superseded) > 0 {
+		go s.postCancelStatuses(superseded, dedupCancelReason)
 	}
 
 	// Add all jobs to the queue
@@ -91,21 +98,32 @@ func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
 	q.schedulerCond.Signal()
 }
 
-// handleDeduplication processes deduplication logic for a new job
-func (q *Queue) handleDeduplication(newJob *Job) {
+// dedupCancelReason is why a job dies to deduplication: a newer job for the same
+// branch or PR displaced it. This is what a force-push looks like from here.
+const dedupCancelReason = "superseded by a newer job"
+
+// handleDeduplication processes deduplication logic for a new job. It returns
+// the jobs it dropped while they were still queued, so the caller can report
+// them to GitHub once it's off the mutex.
+func (q *Queue) handleDeduplication(newJob *Job) []*Job {
 	dedupKey := newJob.DedupKey()
 
+	var dropped []*Job
 	for _, existingJob := range q.jobs {
 		if existingJob.DedupKey() == dedupKey {
 			if existingJob.State == JobStateQueued {
-				log.Printf("Removing queued job %s due to deduplication", existingJob.ID)
+				log.Printf("Removing queued job %s: %s", existingJob.ID, dedupCancelReason)
+				existingJob.cancelReason = dedupCancelReason
 				q.removeJobUnsafe(existingJob.ID)
+				dropped = append(dropped, existingJob)
 			} else if newJob.Dedup == DedupKill {
-				log.Printf("Killing running job %s due to deduplication", existingJob.ID)
+				log.Printf("Killing running job %s: %s", existingJob.ID, dedupCancelReason)
+				existingJob.cancelReason = dedupCancelReason
 				existingJob.Cancel()
 			}
 		}
 	}
+	return dropped
 }
 
 // removeJobUnsafe removes a job from the slice without locking (caller must hold lock)
@@ -324,6 +342,57 @@ func (q *Queue) isJobRunning(id string) bool {
 	return false
 }
 
+// getJob returns the job with the given ID, or nil if it isn't queued or
+// running (it may have already finished).
+func (q *Queue) getJob(id string) *Job {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	for _, job := range q.jobs {
+		if job.ID == id {
+			return job
+		}
+	}
+	return nil
+}
+
+// cancelJob cancels the queued or running job with the given ID, recording why.
+// It returns the job and whether it was still queued (i.e. never started), or
+// nil if there is no such job.
+func (q *Queue) cancelJob(id string, reason string) (*Job, bool) {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	for i, job := range q.jobs {
+		if job.ID != id {
+			continue
+		}
+
+		job.cancelReason = reason
+
+		if job.State == JobStateRunning {
+			log.Printf("Canceling running job %s (%s): %s", job.ID, job.Name, reason)
+			job.Cancel()
+			return job, false
+		}
+
+		log.Printf("Canceling queued job %s (%s): %s", job.ID, job.Name, reason)
+		q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+		q.schedulerCond.Signal()
+		return job, true
+	}
+	return nil, false
+}
+
+// cancelReason returns why the job was canceled, or "" if it wasn't. Reads
+// through the mutex because runJob looks at it from the job's own goroutine.
+func (q *Queue) cancelReason(job *Job) string {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	return job.cancelReason
+}
+
 // getAllJobs returns all jobs (for dashboard)
 func (q *Queue) getAllJobs() []*Job {
 	q.mutex.Lock()
@@ -335,25 +404,33 @@ func (q *Queue) getAllJobs() []*Job {
 	return jobs
 }
 
-// killJobs kills all jobs (queued and running) that match the given condition
-func (q *Queue) killJobs(condition func(*Job) bool) {
+// killJobs kills all jobs (queued and running) that match the given condition,
+// recording why. It returns the jobs it dropped while they were still queued, so
+// the caller can report them to GitHub once it's off the mutex.
+func (q *Queue) killJobs(reason string, condition func(*Job) bool) []*Job {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
+
+	var dropped []*Job
 
 	// Iterate backwards to safely remove jobs while iterating
 	for i := len(q.jobs) - 1; i >= 0; i-- {
 		job := q.jobs[i]
 
 		if condition(job) {
+			job.cancelReason = reason
+
 			switch job.State {
 			case JobStateRunning:
-				log.Printf("Killing running job %s (%s)", job.ID, job.Name)
+				log.Printf("Killing running job %s (%s): %s", job.ID, job.Name, reason)
 				job.Cancel()
 			case JobStateQueued:
-				log.Printf("Dequeuing job %s (%s)", job.ID, job.Name)
+				log.Printf("Dequeuing job %s (%s): %s", job.ID, job.Name, reason)
 				// Remove from queue
 				q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+				dropped = append(dropped, job)
 			}
 		}
 	}
+	return dropped
 }

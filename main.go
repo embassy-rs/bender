@@ -45,6 +45,15 @@ type GithubConfig struct {
 	WebhookSecret string `yaml:"webhook_secret"`
 	AppID         int64  `yaml:"app_id"`
 	PrivateKey    string `yaml:"private_key"`
+
+	// Credentials for "Log in with GitHub" in the web UI. These belong to the
+	// same GitHub App as app_id/private_key: set its Callback URL to
+	// <external_url>/auth/callback and generate a client secret. session_secret
+	// is any long random string; it signs session cookies, and changing it logs
+	// everyone out. Leave these empty to keep the UI read-only for everyone.
+	ClientID      string `yaml:"client_id"`
+	ClientSecret  string `yaml:"client_secret"`
+	SessionSecret string `yaml:"session_secret"`
 }
 
 type Service struct {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,10 @@ func (s *Service) serverRun() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Get("/", s.HandleDashboard)
+	r.Get("/login", s.HandleLogin)
+	r.Post("/logout", s.HandleLogout)
+	r.Get("/auth/callback", s.HandleAuthCallback)
+	r.Post("/jobs/{jobID}/cancel", s.HandleJobCancel)
 	r.Get("/jobs/{jobID}", s.HandleJobLogs)
 	r.Get("/jobs/{jobID}/artifacts", http.RedirectHandler("artifacts/", http.StatusMovedPermanently).ServeHTTP)
 	r.Get("/jobs/{jobID}/artifacts/*", s.HandleJobArtifacts)
@@ -51,8 +56,10 @@ func validJobID(id string) bool {
 
 // DashboardData holds the data for the dashboard template
 type DashboardData struct {
-	AllJobs     []*JobDisplayInfo
-	LastUpdated string
+	AllJobs      []*JobDisplayInfo
+	LastUpdated  string
+	User         string // Logged-in GitHub user, "" if not logged in
+	LoginEnabled bool   // Whether login is configured at all
 }
 
 // JobDisplayInfo holds the display information for a job
@@ -87,11 +94,24 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         a:hover { text-decoration: underline; }
         .queue-pos { text-align: center; }
         .queue-pos.empty { color: #ccc; }
+        .authbar { float: right; font-size: 0.9em; color: #666; }
+        .authbar form { display: inline; }
+        .authbar button, .cancel button { font: inherit; cursor: pointer; }
+        .cancel button { color: #a00; }
     </style>
 </head>
 <body>
+    <div class="authbar">
+    {{if .User}}
+        Signed in as <b>{{.User}}</b>
+        <form method="post" action="/logout"><button type="submit">Log out</button></form>
+    {{else if .LoginEnabled}}
+        <a href="/login">Log in with GitHub</a>
+    {{end}}
+    </div>
+
     <h1>Bender CI Dashboard</h1>
-    
+
     <table>
         <tr>
             <th>Status</th>
@@ -104,6 +124,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <th>Dedup</th>
             <th>GitHub PR</th>
             <th>Logs</th>
+            {{if .User}}<th>Actions</th>{{end}}
         </tr>
         {{range .AllJobs}}
         <tr class="status-{{.Status}}">
@@ -119,6 +140,13 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             <td>{{.DedupMode}}</td>
             <td>{{.GitHubPRLink}}</td>
             <td><a href="{{.LogsURL}}">View Logs</a></td>
+            {{if $.User}}
+            <td class="cancel">
+                <form method="post" action="/jobs/{{.ID}}/cancel" onsubmit="return confirm('Cancel job {{.Name}}?')">
+                    <button type="submit">Cancel</button>
+                </form>
+            </td>
+            {{end}}
         </tr>
         {{end}}
     </table>
@@ -170,6 +198,14 @@ func (s *Service) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	data := DashboardData{
 		AllJobs:     displayJobs,
 		LastUpdated: time.Now().Format("2006-01-02 15:04:05"),
+		// The Cancel buttons are shown to anyone logged in; whether this
+		// particular user may cancel this particular job is settled by the POST
+		// handler, which is the only place it actually matters. Checking push
+		// access per repo here would mean a GitHub API call per row.
+		LoginEnabled: s.authEnabled(),
+	}
+	if sess := s.currentUser(r); sess != nil {
+		data.User = sess.User
 	}
 
 	w.Header().Set("Content-Type", "text/html")
@@ -225,6 +261,59 @@ func createJobDisplayInfo(job *Job) *JobDisplayInfo {
 	}
 
 	return info
+}
+
+// HandleJobCancel cancels a job on behalf of a logged-in user who has push
+// access to the job's repo.
+func (s *Service) HandleJobCancel(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "jobID")
+	if !validJobID(jobID) {
+		log.Printf("invalid job ID: '%s'", jobID)
+		http.Error(w, http.StatusText(404), 404)
+		return
+	}
+
+	sess := s.currentUser(r)
+	if sess == nil {
+		http.Redirect(w, r, "/login?next="+url.QueryEscape("/"), http.StatusSeeOther)
+		return
+	}
+
+	// Look the job up first: we need its repo to know who's allowed to cancel it.
+	job := s.queue.getJob(jobID)
+	if job == nil {
+		http.Error(w, "job not found, it may have already finished", http.StatusNotFound)
+		return
+	}
+	if job.Repo == nil || job.Repo.Owner == nil || job.Repo.Owner.Login == nil || job.Repo.Name == nil {
+		http.Error(w, "job has no repository to check permissions against", http.StatusForbidden)
+		return
+	}
+	owner, repo := *job.Repo.Owner.Login, *job.Repo.Name
+
+	allowed, err := sess.canPushTo(r.Context(), owner, repo)
+	if err != nil {
+		log.Printf("error checking push access for %s on %s/%s: %v", sess.User, owner, repo, err)
+		http.Error(w, "could not verify your permissions", http.StatusBadGateway)
+		return
+	}
+	if !allowed {
+		log.Printf("Denied cancel of job %s: %s has no push access to %s/%s", jobID, sess.User, owner, repo)
+		http.Error(w, fmt.Sprintf("you need push access to %s/%s to cancel its jobs", owner, repo), http.StatusForbidden)
+		return
+	}
+
+	reason := fmt.Sprintf("requested by @%s", sess.User)
+	canceled, wasQueued := s.queue.cancelJob(jobID, reason)
+	if canceled == nil {
+		http.Error(w, "job not found, it may have already finished", http.StatusNotFound)
+		return
+	}
+	if wasQueued {
+		s.postCancelStatuses([]*Job{canceled}, reason)
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Service) HandleJobArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -373,13 +462,15 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			// deletes the `gh-readonly-queue/...` branch we're testing.
 			log.Printf("[webhook] Branch '%s' deleted, killing its jobs", branch)
 
-			s.queue.killJobs(func(job *Job) bool {
+			reason := fmt.Sprintf("branch %s was deleted", branch)
+			dropped := s.queue.killJobs(reason, func(job *Job) bool {
 				// Only push jobs: for pull_request jobs the "branch" attribute is
 				// the *base* branch, which isn't the one being deleted.
 				return job.Event.Event == "push" &&
 					job.Attributes["branch"] == branch &&
 					job.Repo.GetFullName() == e.Repo.GetFullName()
 			})
+			s.postCancelStatuses(dropped, reason)
 			return nil
 		}
 
@@ -424,7 +515,8 @@ func (s *Service) handleWebhook(r *http.Request) error {
 			// Kill all jobs from this PR
 			log.Printf("Killing all jobs for PR #%d in %s/%s", *e.PullRequest.Number, *e.Repo.Owner.Login, *e.Repo.Name)
 
-			s.queue.killJobs(func(job *Job) bool {
+			reason := fmt.Sprintf("PR #%d was closed", *e.PullRequest.Number)
+			dropped := s.queue.killJobs(reason, func(job *Job) bool {
 				return job.PullRequest != nil &&
 					job.PullRequest.Number != nil &&
 					*job.PullRequest.Number == *e.PullRequest.Number &&
@@ -435,6 +527,7 @@ func (s *Service) handleWebhook(r *http.Request) error {
 					*job.Repo.Owner.Login == *e.Repo.Owner.Login &&
 					*job.Repo.Name == *e.Repo.Name
 			})
+			s.postCancelStatuses(dropped, reason)
 		}
 	case *github.IssueCommentEvent:
 		log.Printf("[webhook] Processing IssueCommentEvent: repo=%s, action=%s, issue=#%d", *e.Repo.FullName, *e.Action, *e.Issue.Number)

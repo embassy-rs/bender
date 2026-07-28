@@ -98,6 +98,7 @@ type Job struct {
 	RunnableAt      time.Time          `json:"-"` // When the job became runnable (for cooldown)
 	CooldownReadyAt time.Time          `json:"-"` // When the cooldown expires and job can actually start
 	cancelFunc      context.CancelFunc `json:"-"` // Function to cancel this job
+	cancelReason    string             `json:"-"` // Why this job was canceled, if it was. Guarded by the queue mutex.
 }
 
 // Cancel cancels the job if it's running
@@ -146,6 +147,24 @@ func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, stat
 	return err
 }
 
+// postCancelStatuses reports a terminal GitHub status for jobs that were
+// canceled while still queued. A running job reports its own status when the
+// canceled context unwinds runJob, but a queued one never started, so without
+// this GitHub would show it as pending forever.
+func (s *Service) postCancelStatuses(jobs []*Job, reason string) {
+	for _, job := range jobs {
+		gh, err := s.githubClient(job.InstallationID)
+		if err != nil {
+			log.Printf("error creating github client for cancel status: %v", err)
+			continue
+		}
+		err = s.setStatus(context.Background(), gh, job, "failure", fmt.Sprintf("Canceled: %s", reason))
+		if err != nil {
+			log.Printf("error setting cancel status for job %s: %v", job.ID, err)
+		}
+	}
+}
+
 func (s *Service) runJob(ctx context.Context, job *Job) {
 	// Create a cancellable context for this job
 	jobCtx, cancel := context.WithCancel(ctx)
@@ -187,9 +206,13 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 		fmt.Fprintf(logs, "run failed: %v\n", err)
 		log.Printf("job run failed: %v", err)
 		result = "failure"
-		// The duration goes before the error: GitHub truncates status
-		// descriptions at 140 chars and the error can be arbitrarily long.
-		description = fmt.Sprintf("Failed in %s: %v", duration, err)
+		if reason := s.queue.cancelReason(job); reason != "" {
+			description = fmt.Sprintf("Canceled after %s: %s", duration, reason)
+		} else {
+			// The duration goes before the error: GitHub truncates status
+			// descriptions at 140 chars and the error can be arbitrarily long.
+			description = fmt.Sprintf("Failed in %s: %v", duration, err)
+		}
 	}
 
 	fmt.Fprintf(logs, "job %s in %s\n", result, duration)

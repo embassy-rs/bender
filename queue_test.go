@@ -200,3 +200,86 @@ func TestJobStates(t *testing.T) {
 		t.Errorf("Expected no jobs after finish, got %d", len(allJobs))
 	}
 }
+
+func newTestQueue() *Queue {
+	q := &Queue{jobs: make([]*Job, 0), maxConcurrency: 2}
+	q.schedulerCond = sync.NewCond(&q.mutex)
+	return q
+}
+
+// A canceled job must carry why it died, so runJob and the GitHub status can
+// report it instead of a bare "context canceled".
+func TestCancelReasonIsRecorded(t *testing.T) {
+	t.Run("queued job via killJobs", func(t *testing.T) {
+		q := newTestQueue()
+		job := &Job{ID: "a", Name: "test", State: JobStateQueued, Event: &Event{}}
+		q.jobs = append(q.jobs, job)
+
+		dropped := q.killJobs("PR #7 was closed", func(j *Job) bool { return true })
+
+		// Queued jobs are returned so the caller can clear their pending status.
+		if len(dropped) != 1 || dropped[0] != job {
+			t.Fatalf("got %d dropped jobs, want the one queued job", len(dropped))
+		}
+		if got := q.cancelReason(job); got != "PR #7 was closed" {
+			t.Errorf("cancelReason = %q, want %q", got, "PR #7 was closed")
+		}
+		if len(q.jobs) != 0 {
+			t.Errorf("job still in queue after kill")
+		}
+	})
+
+	t.Run("running job via killJobs", func(t *testing.T) {
+		q := newTestQueue()
+		canceled := false
+		job := &Job{ID: "b", Name: "test", State: JobStateRunning, Event: &Event{},
+			cancelFunc: func() { canceled = true }}
+		q.jobs = append(q.jobs, job)
+
+		dropped := q.killJobs("branch foo was deleted", func(j *Job) bool { return true })
+
+		// A running job reports its own status via runJob, so it isn't returned.
+		if len(dropped) != 0 {
+			t.Errorf("got %d dropped jobs, want 0 for a running job", len(dropped))
+		}
+		if !canceled {
+			t.Error("running job was not canceled")
+		}
+		if got := q.cancelReason(job); got != "branch foo was deleted" {
+			t.Errorf("cancelReason = %q, want %q", got, "branch foo was deleted")
+		}
+	})
+
+	t.Run("cancelJob reports whether it was queued", func(t *testing.T) {
+		q := newTestQueue()
+		queued := &Job{ID: "c", Name: "test", State: JobStateQueued, Event: &Event{}}
+		running := &Job{ID: "d", Name: "test", State: JobStateRunning, Event: &Event{},
+			cancelFunc: func() {}}
+		q.jobs = append(q.jobs, queued, running)
+
+		got, wasQueued := q.cancelJob("c", "requested by @alice")
+		if got != queued || !wasQueued {
+			t.Errorf("cancelJob(c) = %v, %v; want the queued job, true", got, wasQueued)
+		}
+		if r := q.cancelReason(queued); r != "requested by @alice" {
+			t.Errorf("cancelReason = %q, want %q", r, "requested by @alice")
+		}
+
+		got, wasQueued = q.cancelJob("d", "requested by @bob")
+		if got != running || wasQueued {
+			t.Errorf("cancelJob(d) = %v, %v; want the running job, false", got, wasQueued)
+		}
+
+		if got, _ := q.cancelJob("nonexistent", "whatever"); got != nil {
+			t.Errorf("cancelJob(nonexistent) = %v, want nil", got)
+		}
+	})
+
+	t.Run("uncanceled job has no reason", func(t *testing.T) {
+		q := newTestQueue()
+		job := &Job{ID: "e", Name: "test", State: JobStateRunning, Event: &Event{}}
+		if got := q.cancelReason(job); got != "" {
+			t.Errorf("cancelReason = %q, want empty", got)
+		}
+	})
+}
