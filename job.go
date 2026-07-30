@@ -203,12 +203,16 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 	result := "success"
 	description := fmt.Sprintf("Completed in %s", duration)
 	if err != nil {
-		fmt.Fprintf(logs, "run failed: %v\n", err)
 		log.Printf("job run failed: %v", err)
 		result = "failure"
 		if reason := s.queue.cancelReason(job); reason != "" {
+			// Say why in the log too. Otherwise all the log shows is whatever
+			// error the cancellation happened to surface ("context canceled"),
+			// which doesn't tell the reader anyone canceled it, let alone who.
+			fmt.Fprintf(logs, "job canceled: %s\n", reason)
 			description = fmt.Sprintf("Canceled after %s: %s", duration, reason)
 		} else {
+			fmt.Fprintf(logs, "run failed: %v\n", err)
 			// The duration goes before the error: GitHub truncates status
 			// descriptions at 140 chars and the error can be arbitrarily long.
 			description = fmt.Sprintf("Failed in %s: %v", duration, err)
