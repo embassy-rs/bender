@@ -129,6 +129,68 @@ func TestRefreshIfNeededNoop(t *testing.T) {
 	}
 }
 
+func TestRefreshCacheCollapsesConcurrentUse(t *testing.T) {
+	// GitHub's refresh tokens are single-use, so every caller presenting the
+	// same one must come away with the same replacement — otherwise all but one
+	// end up holding a token GitHub already invalidated.
+	var c refreshCache
+	const token = "ref-old"
+
+	entry, mine := c.take(token)
+	if !mine {
+		t.Fatal("first caller wasn't given the work")
+	}
+
+	// A second caller arriving while the exchange is in flight waits instead of
+	// starting its own.
+	waiter, mine := c.take(token)
+	if mine {
+		t.Error("second caller started a competing refresh")
+	}
+	if waiter != entry {
+		t.Error("second caller got a different entry")
+	}
+
+	select {
+	case <-waiter.done:
+		t.Fatal("entry was done before the refresh finished")
+	default:
+	}
+
+	want := newSession("alice", &oauthToken{AccessToken: "tok-new", RefreshToken: "ref-new", ExpiresIn: 28800})
+	c.fill(token, entry, want, nil)
+
+	<-waiter.done
+	if waiter.sess != want {
+		t.Errorf("waiter got %+v, want %+v", waiter.sess, want)
+	}
+
+	// And a caller that shows up after the fact — its cookie still holding the
+	// consumed token because the winner's Set-Cookie hasn't landed yet — gets
+	// the same result rather than a dead token.
+	late, mine := c.take(token)
+	if mine {
+		t.Error("late caller tried to reuse the consumed refresh token")
+	}
+	if late.sess != want {
+		t.Errorf("late caller got %+v, want %+v", late.sess, want)
+	}
+}
+
+func TestRefreshCacheDropsFailures(t *testing.T) {
+	// A failed exchange must not stick: the token may still be good and the next
+	// request should get a real attempt.
+	var c refreshCache
+	const token = "ref-old"
+
+	entry, _ := c.take(token)
+	c.fill(token, entry, nil, errSessionExpired)
+
+	if _, mine := c.take(token); !mine {
+		t.Error("next caller inherited the cached failure instead of retrying")
+	}
+}
+
 func TestSessionRoundTripsThroughCookie(t *testing.T) {
 	// A refreshed session has to survive the cookie, or the next request would
 	// arrive with the old token and 401.

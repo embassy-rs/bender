@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v88/github"
@@ -33,7 +34,83 @@ const (
 
 	// How far ahead of expiry we proactively refresh the access token.
 	tokenRefreshMargin = 2 * time.Minute
+
+	// How long the result of a refresh stays available to other requests still
+	// carrying the refresh token it consumed. See refreshCache.
+	refreshCacheTTL = 5 * time.Minute
 )
+
+// refreshCache remembers what each refresh token was traded for, keyed by the
+// consumed token.
+//
+// GitHub's refresh tokens are single-use: "Once you use a refresh token, that
+// refresh token and the old user access token will no longer work." A browser
+// with two requests in flight sends the same cookie on both, so without this
+// they'd race — one would win and the other would be left holding a token
+// GitHub had just invalidated, logging the user out mid-click.
+//
+// The cache does double duty: concurrent callers with the same token collapse
+// onto one refresh, and a caller arriving shortly after one finished (its
+// cookie still the old one, since the winner's Set-Cookie may not have reached
+// the browser yet) gets handed the same result instead of a dead token.
+//
+// This is in-process only. A restart mid-window costs the user a re-login,
+// which is the same thing that happens today, so it isn't worth persisting.
+type refreshCache struct {
+	mu      sync.Mutex
+	entries map[string]*refreshEntry
+}
+
+type refreshEntry struct {
+	done chan struct{} // closed once sess/err are set
+	at   time.Time     // when the refresh completed
+	sess *session
+	err  error
+}
+
+// take returns the entry for a refresh token. The bool reports whether the
+// caller is responsible for performing the refresh and calling fill.
+func (c *refreshCache) take(token string) (*refreshEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.entries == nil {
+		c.entries = map[string]*refreshEntry{}
+	}
+	if e, ok := c.entries[token]; ok {
+		return e, false
+	}
+
+	// Prune completed entries that have aged out. There's one per refresh, so
+	// doing it on insert is enough to keep this from growing.
+	for k, e := range c.entries {
+		select {
+		case <-e.done:
+			if time.Since(e.at) > refreshCacheTTL {
+				delete(c.entries, k)
+			}
+		default:
+		}
+	}
+
+	e := &refreshEntry{done: make(chan struct{})}
+	c.entries[token] = e
+	return e, true
+}
+
+// fill publishes the outcome of a refresh to everyone waiting on it. A failed
+// refresh is dropped rather than cached, so a transient error doesn't lock the
+// user out for the rest of the TTL.
+func (c *refreshCache) fill(token string, e *refreshEntry, sess *session, err error) {
+	e.sess, e.err, e.at = sess, err, time.Now()
+	close(e.done)
+
+	if err != nil {
+		c.mu.Lock()
+		delete(c.entries, token)
+		c.mu.Unlock()
+	}
+}
 
 // errSessionExpired means the token in the session cookie is no longer accepted
 // by GitHub, so the user has to log in again.
@@ -341,18 +418,39 @@ func (s *Service) oauthTokenRequest(ctx context.Context, form url.Values) (*oaut
 //
 // Sessions with no refresh token — the app's user tokens don't expire — are
 // left alone.
+//
+// Refresh tokens are single-use, so concurrent requests carrying the same one
+// go through refreshCache and share a single exchange rather than racing.
 func (s *Service) refreshIfNeeded(ctx context.Context, w http.ResponseWriter, sess *session) error {
 	if !sess.needsRefresh() {
 		return nil
 	}
 
-	token, err := s.refreshOAuthToken(ctx, sess.Refresh)
-	if err != nil {
-		log.Printf("refreshing token for %s failed, forcing re-login: %v", sess.User, err)
-		return errSessionExpired
+	old := sess.Refresh
+	entry, mine := s.refreshes.take(old)
+	if mine {
+		token, err := s.refreshOAuthToken(ctx, old)
+		var fresh *session
+		if err != nil {
+			log.Printf("refreshing token for %s failed, forcing re-login: %v", sess.User, err)
+			err = errSessionExpired
+		} else {
+			fresh = newSession(sess.User, token)
+		}
+		s.refreshes.fill(old, entry, fresh, err)
+	} else {
+		select {
+		case <-entry.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
-	*sess = *newSession(sess.User, token)
+	if entry.err != nil {
+		return entry.err
+	}
+
+	*sess = *entry.sess
 	return s.saveSession(w, sess)
 }
 

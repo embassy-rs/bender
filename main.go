@@ -61,6 +61,7 @@ type Service struct {
 	containerd *containerd.Client
 	queue      *Queue
 	cgroup     CgroupManager
+	refreshes  refreshCache
 }
 
 func main() {
@@ -196,7 +197,7 @@ func (s *Service) cleanupStale() {
 	}()
 }
 
-func (s Service) schedulerRun() {
+func (s *Service) schedulerRun() {
 	for {
 		job := s.queue.nextJob()
 		go s.runJob(context.Background(), job)
