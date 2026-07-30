@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testService(secret string) *Service {
@@ -57,6 +60,102 @@ func TestUnsignRejectsTampering(t *testing.T) {
 	// makes rotating session_secret log everyone out.
 	if _, ok := testService("other-secret").unsign(signed); ok {
 		t.Error("accepted a cookie signed with a different secret")
+	}
+}
+
+func TestNewSession(t *testing.T) {
+	// Apps without expiring user tokens get no refresh token and no expiry, and
+	// must never be treated as needing a refresh.
+	sess := newSession("alice", &oauthToken{AccessToken: "tok"})
+	if sess.Refresh != "" || sess.ExpiresAt != 0 {
+		t.Errorf("non-expiring token stored refresh=%q expires=%d, want empty", sess.Refresh, sess.ExpiresAt)
+	}
+	if sess.needsRefresh() {
+		t.Error("non-expiring token wants a refresh")
+	}
+
+	sess = newSession("alice", &oauthToken{AccessToken: "tok", RefreshToken: "ref", ExpiresIn: 28800})
+	if sess.Refresh != "ref" {
+		t.Errorf("got refresh %q, want \"ref\"", sess.Refresh)
+	}
+	if got := time.Until(time.Unix(sess.ExpiresAt, 0)); got < 7*time.Hour || got > 9*time.Hour {
+		t.Errorf("expiry is %v away, want ~8h", got)
+	}
+	if sess.needsRefresh() {
+		t.Error("a freshly issued token wants a refresh")
+	}
+}
+
+func TestNeedsRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+		sess session
+		want bool
+	}{
+		{"fresh", session{Refresh: "r", ExpiresAt: time.Now().Add(time.Hour).Unix()}, false},
+		{"expired", session{Refresh: "r", ExpiresAt: time.Now().Add(-time.Hour).Unix()}, true},
+		// Inside the margin we refresh early, so a request can't expire mid-flight.
+		{"expiring now", session{Refresh: "r", ExpiresAt: time.Now().Add(30 * time.Second).Unix()}, true},
+		// Old cookies from before refresh tokens were stored: nothing to refresh
+		// with, so they're left to the 401 path instead.
+		{"no refresh token", session{ExpiresAt: time.Now().Add(-time.Hour).Unix()}, false},
+		{"no expiry", session{Refresh: "r"}, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.sess.needsRefresh(); got != test.want {
+				t.Errorf("needsRefresh() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRefreshIfNeededNoop(t *testing.T) {
+	// With nothing to refresh, no network call happens and the cookie is left
+	// untouched. (Any HTTP attempt here would fail the test by erroring.)
+	s := testService("hunter2")
+	sess := session{User: "alice", Token: "tok"}
+	w := httptest.NewRecorder()
+
+	if err := s.refreshIfNeeded(context.Background(), w, &sess); err != nil {
+		t.Fatalf("refreshIfNeeded() = %v, want nil", err)
+	}
+	if got := w.Result().Cookies(); len(got) != 0 {
+		t.Errorf("rewrote %d cookies, want 0", len(got))
+	}
+	if sess.Token != "tok" {
+		t.Errorf("token changed to %q", sess.Token)
+	}
+}
+
+func TestSessionRoundTripsThroughCookie(t *testing.T) {
+	// A refreshed session has to survive the cookie, or the next request would
+	// arrive with the old token and 401.
+	s := testService("hunter2")
+	want := newSession("alice", &oauthToken{AccessToken: "tok2", RefreshToken: "ref2", ExpiresIn: 28800})
+
+	w := httptest.NewRecorder()
+	if err := s.saveSession(w, want); err != nil {
+		t.Fatal(err)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("wrote %d cookies, want 1", len(cookies))
+	}
+
+	r, err := http.NewRequest("GET", "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.AddCookie(cookies[0])
+
+	got := s.currentUser(r)
+	if got == nil {
+		t.Fatal("saved session didn't come back")
+	}
+	if *got != *want {
+		t.Errorf("got %+v, want %+v", *got, *want)
 	}
 }
 

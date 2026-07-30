@@ -306,7 +306,17 @@ func (s *Service) HandleJobCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, repo := *job.Repo.Owner.Login, *job.Repo.Name
 
-	allowed, err := sess.canPushTo(r.Context(), owner, repo)
+	err := s.refreshIfNeeded(r.Context(), w, sess)
+	var allowed bool
+	if err == nil {
+		allowed, err = sess.canPushTo(r.Context(), owner, repo)
+	}
+	if errors.Is(err, errSessionExpired) {
+		// Clear the dead cookie, otherwise they'd keep hitting this forever.
+		s.clearCookie(w, sessionCookie)
+		http.Redirect(w, r, "/login?next="+url.QueryEscape("/"), http.StatusSeeOther)
+		return
+	}
 	if err != nil {
 		log.Printf("error checking push access for %s on %s/%s: %v", sess.User, owner, repo, err)
 		http.Error(w, "could not verify your permissions", http.StatusBadGateway)

@@ -135,6 +135,11 @@ func is404(err error) bool {
 	return errors.As(err, &ghErr) && ghErr.Response.StatusCode == 404
 }
 
+func is401(err error) bool {
+	var ghErr *github.ErrorResponse
+	return errors.As(err, &ghErr) && ghErr.Response.StatusCode == 401
+}
+
 func (s *Service) githubClient(installationID int64) (*github.Client, error) {
 	itr, err := ghinstallation.New(http.DefaultTransport, s.config.Github.AppID, installationID, []byte(s.config.Github.PrivateKey))
 	if err != nil {

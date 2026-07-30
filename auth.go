@@ -30,13 +30,60 @@ const (
 
 	// How long the user has to complete the redirect to GitHub and back.
 	oauthStateTTL = 10 * time.Minute
+
+	// How far ahead of expiry we proactively refresh the access token.
+	tokenRefreshMargin = 2 * time.Minute
 )
+
+// errSessionExpired means the token in the session cookie is no longer accepted
+// by GitHub, so the user has to log in again.
+var errSessionExpired = errors.New("session expired")
 
 // session is everything we remember about a logged-in user. It lives entirely
 // in a signed cookie, so the server stores nothing.
 type session struct {
 	User  string `json:"u"`
 	Token string `json:"t"` // GitHub user token, used to check repo permissions.
+
+	// Set only when the GitHub App has expiring user tokens turned on. With it
+	// off, GitHub hands out a token that never expires and these stay empty.
+	Refresh   string `json:"r,omitempty"`
+	ExpiresAt int64  `json:"e,omitempty"` // unix seconds; zero means "never".
+}
+
+// needsRefresh reports whether the access token is close enough to expiry that
+// we should trade the refresh token in before using it. The margin covers both
+// clock skew and the time the request itself takes.
+func (sess *session) needsRefresh() bool {
+	if sess.Refresh == "" || sess.ExpiresAt == 0 {
+		return false
+	}
+	return time.Now().Add(tokenRefreshMargin).Unix() >= sess.ExpiresAt
+}
+
+// newSession builds a session from a GitHub token response.
+func newSession(user string, token *oauthToken) *session {
+	sess := &session{
+		User:    user,
+		Token:   token.AccessToken,
+		Refresh: token.RefreshToken,
+	}
+	if token.ExpiresIn > 0 {
+		sess.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix()
+	}
+	return sess
+}
+
+// saveSession writes the session back into the signed cookie. It has to be
+// called again whenever the token is refreshed, or the next request would come
+// back with the stale one.
+func (s *Service) saveSession(w http.ResponseWriter, sess *session) error {
+	buf, err := json.Marshal(sess)
+	if err != nil {
+		return err
+	}
+	s.setCookie(w, sessionCookie, s.sign(buf), sessionCookieMaxAge)
+	return nil
 }
 
 // authEnabled reports whether login is configured. Without it the UI stays
@@ -192,7 +239,7 @@ func (s *Service) HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gh, err := github.NewClient(github.WithAuthToken(token))
+	gh, err := github.NewClient(github.WithAuthToken(token.AccessToken))
 	if err != nil {
 		log.Printf("error creating github client for login: %v", err)
 		http.Error(w, "login failed", http.StatusInternalServerError)
@@ -205,16 +252,12 @@ func (s *Service) HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf, err := json.Marshal(session{
-		User:  user.GetLogin(),
-		Token: token,
-	})
-	if err != nil {
+	sess := newSession(user.GetLogin(), token)
+	if err := s.saveSession(w, sess); err != nil {
 		log.Printf("error encoding session: %v", err)
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
-	s.setCookie(w, sessionCookie, s.sign(buf), sessionCookieMaxAge)
 
 	log.Printf("Web login: %s", user.GetLogin())
 	http.Redirect(w, r, safeReturnPath(next), http.StatusFound)
@@ -225,47 +268,92 @@ func (s *Service) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// exchangeOAuthCode trades the code GitHub sent us for a user access token.
-func (s *Service) exchangeOAuthCode(ctx context.Context, code string) (string, error) {
-	if code == "" {
-		return "", errors.New("no code in callback")
-	}
+// oauthToken is GitHub's reply to a token request. RefreshToken and ExpiresIn
+// are only populated for apps with expiring user tokens enabled.
+type oauthToken struct {
+	AccessToken  string `json:"access_token"`
+	ExpiresIn    int64  `json:"expires_in"` // seconds
+	RefreshToken string `json:"refresh_token"`
 
-	form := url.Values{
-		"client_id":     {s.config.Github.ClientID},
-		"client_secret": {s.config.Github.ClientSecret},
-		"code":          {code},
-		"redirect_uri":  {s.config.ExternalURL + "/auth/callback"},
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+}
+
+// exchangeOAuthCode trades the code GitHub sent us for a user access token.
+func (s *Service) exchangeOAuthCode(ctx context.Context, code string) (*oauthToken, error) {
+	if code == "" {
+		return nil, errors.New("no code in callback")
 	}
+	return s.oauthTokenRequest(ctx, url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {code},
+		"redirect_uri": {s.config.ExternalURL + "/auth/callback"},
+	})
+}
+
+// refreshOAuthToken trades a refresh token for a fresh access token. GitHub
+// rotates the refresh token too, so the reply's must replace the stored one.
+func (s *Service) refreshOAuthToken(ctx context.Context, refresh string) (*oauthToken, error) {
+	return s.oauthTokenRequest(ctx, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refresh},
+	})
+}
+
+// oauthTokenRequest posts to GitHub's token endpoint, adding our app
+// credentials to the caller's grant-specific parameters.
+func (s *Service) oauthTokenRequest(ctx context.Context, form url.Values) (*oauthToken, error) {
+	form.Set("client_id", s.config.Github.ClientID)
+	form.Set("client_secret", s.config.Github.ClientSecret)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://github.com/login/oauth/access_token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var res struct {
-		AccessToken      string `json:"access_token"`
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-	}
+	var res oauthToken
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", errors.Errorf("decoding token response (http %d): %w", resp.StatusCode, err)
+		return nil, errors.Errorf("decoding token response (http %d): %w", resp.StatusCode, err)
 	}
 	if res.Error != "" {
-		return "", errors.Errorf("github said: %s (%s)", res.Error, res.ErrorDescription)
+		return nil, errors.Errorf("github said: %s (%s)", res.Error, res.ErrorDescription)
 	}
 	if res.AccessToken == "" {
-		return "", errors.Errorf("github returned no access token (http %d)", resp.StatusCode)
+		return nil, errors.Errorf("github returned no access token (http %d)", resp.StatusCode)
 	}
-	return res.AccessToken, nil
+	return &res, nil
+}
+
+// refreshIfNeeded renews the access token when it's expired or nearly so, and
+// writes the result back to the cookie. It returns errSessionExpired when the
+// refresh token itself is no longer good (they expire after six months, and a
+// user revoking the app kills them immediately), which means the only way
+// forward is another trip through login.
+//
+// Sessions with no refresh token — the app's user tokens don't expire — are
+// left alone.
+func (s *Service) refreshIfNeeded(ctx context.Context, w http.ResponseWriter, sess *session) error {
+	if !sess.needsRefresh() {
+		return nil
+	}
+
+	token, err := s.refreshOAuthToken(ctx, sess.Refresh)
+	if err != nil {
+		log.Printf("refreshing token for %s failed, forcing re-login: %v", sess.User, err)
+		return errSessionExpired
+	}
+
+	*sess = *newSession(sess.User, token)
+	return s.saveSession(w, sess)
 }
 
 // canPushTo reports whether the logged-in user has push access to a repo.
@@ -279,6 +367,17 @@ func (sess *session) canPushTo(ctx context.Context, owner, name string) (bool, e
 		return false, err
 	}
 	repo, _, err := gh.Repositories.Get(ctx, owner, name)
+	if is401(err) {
+		// The token in the cookie is dead: expired, or the user revoked our
+		// authorization. The session itself is still validly signed, so the only
+		// way out is to send them through login again.
+		return false, errSessionExpired
+	}
+	if is404(err) {
+		// With a user token, a repo the user can't see is indistinguishable from
+		// one that doesn't exist. Either way they can't push to it.
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
