@@ -90,3 +90,45 @@ database. They don't expire; changing `session_secret` logs everyone out.
 
 Leave these three settings out and the UI stays read-only for everyone, with no
 login link.
+
+## Merge queue support
+
+Bender understands GitHub merge queue branches (`gh-readonly-queue/...`) out of
+the box. Two background tasks keep the merge queue from wedging:
+
+- Long jobs keep refreshing their GitHub status (every `status_refresh_interval`,
+  default 30 minutes). This matters because GitHub's merge queue fails a group
+  when a required check goes silent for too long (default 60 minutes).
+- A poller reconciles each configured repo's queue branches against bender's
+  in-memory job queue. A queue branch with no live job is a push notification
+  bender missed — e.g. because it was restarting, which loses the in-memory
+  queue. After `event_grace` (which accounts for GitHub's event delivery
+  delay), the job is reconstructed and put back into the queue.
+
+Add this to `config.toml`:
+
+```yaml
+# Re-post a pending status to GitHub this often for jobs that are still
+# running or queued. Prevents GitHub's merge queue check timeout (default
+# 60 min) from failing long-running groups. Set to 0s to disable.
+status_refresh_interval: 30m
+
+merge_queue:
+  enabled: true
+  repos: [embassy-rs/embassy]  # owner/repo list to poll
+  poll_interval: 5m      # how often to list the queue branches
+  event_grace: 15m       # wait this long for the webhook before treating
+                         # a queue branch's job as missed
+  job_ttl: 24h           # remember finished merge-queue jobs this long, so
+                         # we don't retrigger a group that's still waiting
+                         # on another required check
+  # What to do with a missed notification. "retrigger" (default) puts the CI
+  # jobs back into the in-memory queue. "fail" posts a failure status on
+  # fail_contexts so GitHub removes the PR from the queue.
+  action: retrigger
+  fail_contexts: []      # e.g. ["ci/build"], only used with action: fail
+```
+
+The poller keeps everything in memory — branch listings are compared against
+the in-memory queue each round, with timestamps purged as branches leave the
+queue, so nothing accumulates on disk.
