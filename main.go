@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -30,6 +31,12 @@ type Config struct {
 	// gets OOM-killed as a group (memory.oom.group=1).
 	MemoryMax     string `yaml:"memory_max"`
 	MemorySwapMax string `yaml:"memory_swap_max"`
+
+	// How often to re-post a pending status to GitHub for jobs that are still
+	// running or queued. GitHub's merge queue fails a group when a required
+	// check goes silent for too long (default 60 minutes), so jobs lasting
+	// more than that must keep refreshing their status. 0 disables.
+	StatusRefreshInterval time.Duration `yaml:"status_refresh_interval"`
 }
 
 type CacheConfig struct {

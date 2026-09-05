@@ -194,6 +194,30 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 		log.Printf("error creating pending status: %v", err)
 	}
 
+	// Keep GitHub posted while the job runs. A job lasting more than an hour
+	// would otherwise go silent and hit GitHub's merge-queue check timeout
+	// (default 60 minutes), failing the merge group even though the job is
+	// perfectly healthy.
+	if interval := s.config.StatusRefreshInterval; interval > 0 {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					desc := fmt.Sprintf("Job is running... (%s so far)", formatDuration(time.Since(job.StartedAt)))
+					if err := s.setStatus(ctx, gh, job, "pending", desc); err != nil {
+						log.Printf("error refreshing running status for job %s: %v", job.ID, err)
+					}
+				}
+			}
+		}()
+	}
+
 	err = nopanic(func() error {
 		return s.runJobInner(jobCtx, job, gh, logs)
 	})
