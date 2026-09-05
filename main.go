@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -30,6 +31,39 @@ type Config struct {
 	// gets OOM-killed as a group (memory.oom.group=1).
 	MemoryMax     string `yaml:"memory_max"`
 	MemorySwapMax string `yaml:"memory_swap_max"`
+
+	// How often to re-post a pending status to GitHub for jobs that are still
+	// running or queued. GitHub's merge queue fails a group when a required
+	// check goes silent for too long (default 60 minutes), so jobs lasting
+	// more than that must keep refreshing their status. 0 disables.
+	StatusRefreshInterval time.Duration    `yaml:"status_refresh_interval"`
+	MergeQueue            MergeQueueConfig `yaml:"merge_queue"`
+}
+
+type MergeQueueConfig struct {
+	// Reconstruct missed merge queue notifications: poll the configured repos'
+	// gh-readonly-queue branches against the in-memory job queue, and put jobs
+	// whose notification never arrived back into the queue.
+	Enabled bool `yaml:"enabled"`
+	// Repositories to poll, as "owner/repo". Everything the poller needs is
+	// computed in memory; nothing is written to disk.
+	Repos []string `yaml:"repos"`
+	// How often to poll. Default 5m.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// How long to wait for the push webhook after a queue branch appears
+	// before treating the notification as missed. Accounts for GitHub's event
+	// delivery delay. Default 15m.
+	EventGrace time.Duration `yaml:"event_grace"`
+	// How long a finished merge-queue job's sha is remembered, so the poller
+	// doesn't retrigger work that already completed while GitHub waits on
+	// another required check. Default 24h.
+	JobTTL time.Duration `yaml:"job_ttl"`
+	// What to do with a missed notification: "retrigger" (default) puts the CI
+	// jobs back into the queue; "fail" posts a failure status on FailContexts
+	// so GitHub removes the PR from the queue.
+	Action string `yaml:"action"`
+	// Status contexts to post failures on when Action is "fail".
+	FailContexts []string `yaml:"fail_contexts"`
 }
 
 type CacheConfig struct {
@@ -62,6 +96,7 @@ type Service struct {
 	queue      *Queue
 	cgroup     CgroupManager
 	refreshes  refreshCache
+	mq         *mergeQueueTracker
 }
 
 func main() {
@@ -74,14 +109,21 @@ func main() {
 		log.Fatal(err)
 	}
 	config := Config{
-		ListenPort:     8000,
-		MaxConcurrency: 4, // Default to 4 concurrent jobs
+		ListenPort:            8000,
+		MaxConcurrency:        4, // Default to 4 concurrent jobs
 		Cache: CacheConfig{
 			MinFreeSpaceMB: 20 * 1024, // 20gb
 			MaxSizeMB:      40 * 1024, // 40gb
 		},
-		MemoryMax:     "12G",
-		MemorySwapMax: "2G",
+		MemoryMax:             "12G",
+		MemorySwapMax:         "2G",
+		StatusRefreshInterval: 30 * time.Minute,
+		MergeQueue: MergeQueueConfig{
+			PollInterval: 5 * time.Minute,
+			EventGrace:   15 * time.Minute,
+			JobTTL:       24 * time.Hour,
+			Action:       "retrigger",
+		},
 	}
 	err = yaml.Unmarshal(configData, &config)
 	if err != nil {
@@ -122,6 +164,7 @@ func main() {
 		containerd: cntd,
 		queue:      queue,
 		cgroup:     cgroup,
+		mq:         newMergeQueueTracker(),
 	}
 
 	s.cleanupStale()
@@ -135,6 +178,14 @@ func main() {
 	}
 
 	go s.cacheGCRun()
+
+	if config.StatusRefreshInterval > 0 {
+		go s.staleJobStatusRun()
+	}
+
+	if config.MergeQueue.Enabled {
+		go s.mergeQueuePollRun()
+	}
 
 	s.serverRun()
 }

@@ -404,6 +404,38 @@ func (q *Queue) getAllJobs() []*Job {
 	return jobs
 }
 
+// hasLiveJobFor reports whether a queued or running job exists for the given
+// repo and commit sha. Used by the merge queue poller to detect lost jobs.
+func (q *Queue) hasLiveJobFor(repoFullName, sha string) bool {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	for _, job := range q.jobs {
+		if job.State != JobStateQueued && job.State != JobStateRunning {
+			continue
+		}
+		if job.SHA == sha && job.Repo != nil && job.Repo.GetFullName() == repoFullName {
+			return true
+		}
+	}
+	return false
+}
+
+// getStaleQueuedJobs returns queued jobs that have been waiting longer than d.
+func (q *Queue) getStaleQueuedJobs(d time.Duration) []*Job {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	cutoff := time.Now().Add(-d)
+	var out []*Job
+	for _, job := range q.jobs {
+		if job.State == JobStateQueued && job.EnqueuedAt.Before(cutoff) {
+			out = append(out, job)
+		}
+	}
+	return out
+}
+
 // killJobs kills all jobs (queued and running) that match the given condition,
 // recording why. It returns the jobs it dropped while they were still queued, so
 // the caller can report them to GitHub once it's off the mutex.
