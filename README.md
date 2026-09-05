@@ -45,18 +45,18 @@ This project is actively maintained only for the goal of running [Embassy](https
 - Write the following into `config.toml`.
 
 ```yaml
-external_url: https://bender.example.com  # replace
+external_url: https://bender.example.com # replace
 data_dir: data
-listen_port: 8000 
+listen_port: 8000
 image: embassy.dev/ci:latest
 net_sandbox:
   allowed_domains:
-  - '*.github.com'
-  - '*.githubusercontent.com'
+    - "*.github.com"
+    - "*.githubusercontent.com"
 github:
-  webhook_secret: REPLACE_ME_WITH_YOUR_SECRET  # replace
-  app_id: 321321  # replace
-  private_key: |  # replace
+  webhook_secret: REPLACE_ME_WITH_YOUR_SECRET # replace
+  app_id: 321321 # replace
+  private_key: | # replace
     -----BEGIN RSA PRIVATE KEY-----
     MIIEpQxxxxxxxxx
     xxxxxxxxxxxxxREPLACE_MExxxxxxxxx
@@ -74,9 +74,9 @@ GitHub App's OAuth credentials to the `github:` section of the config:
 ```yaml
 github:
   # ... webhook_secret, app_id, private_key as above ...
-  client_id: Iv1.xxxxxxxxxxxx  # replace
-  client_secret: REPLACE_ME  # replace
-  session_secret: REPLACE_ME  # replace, e.g. `pwgen -s 64`
+  client_id: Iv1.xxxxxxxxxxxx # replace
+  client_secret: REPLACE_ME # replace
+  session_secret: REPLACE_ME # replace, e.g. `pwgen -s 64`
 ```
 
 Make sure the app's Callback URL is `<external_url>/auth/callback`.
@@ -90,3 +90,21 @@ database. They don't expire; changing `session_secret` logs everyone out.
 
 Leave these three settings out and the UI stays read-only for everyone, with no
 login link.
+
+## Merge queue support
+
+Bender understands GitHub merge queue branches (`gh-readonly-queue/...`) out of
+the box.
+
+- Long jobs keep refreshing their GitHub status (every `status_refresh_interval`,
+  default 30 minutes). This matters because GitHub's merge queue fails a group
+  when a required check goes silent for too long (default 60 minutes).
+
+Add this to `config.toml`:
+
+```yaml
+# Re-post a pending status to GitHub this often for jobs that are still
+# running or queued. Prevents GitHub's merge queue check timeout (default
+# 60 min) from failing long-running groups. Set to 0s to disable.
+status_refresh_interval: 30m
+```
