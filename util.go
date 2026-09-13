@@ -140,6 +140,18 @@ func is401(err error) bool {
 	return errors.As(err, &ghErr) && ghErr.Response.StatusCode == 401
 }
 
+// githubAppClient returns a client authenticated as the app itself, with a
+// JWT. Needed for the app-level endpoints (notably /app/hook/deliveries), which
+// reject installation tokens.
+func (s *Service) githubAppClient() (*github.Client, error) {
+	itr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, s.config.Github.AppID, []byte(s.config.Github.PrivateKey))
+	if err != nil {
+		return nil, err
+	}
+
+	return github.NewClient(github.WithHTTPClient(&http.Client{Transport: itr}))
+}
+
 func (s *Service) githubClient(installationID int64) (*github.Client, error) {
 	itr, err := ghinstallation.New(http.DefaultTransport, s.config.Github.AppID, installationID, []byte(s.config.Github.PrivateKey))
 	if err != nil {

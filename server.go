@@ -435,9 +435,8 @@ func (s *Service) HandleJobLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleWebhook(r *http.Request) error {
-	log.Printf("[webhook] Received webhook: %s", github.WebHookType(r))
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	eventType, guid := github.WebHookType(r), github.DeliveryID(r)
+	log.Printf("[webhook] Received webhook: %s (delivery %s)", eventType, guid)
 
 	payload, err := github.ValidatePayload(r, []byte(s.config.Github.WebhookSecret))
 	defer r.Body.Close()
@@ -447,6 +446,24 @@ func (s *Service) handleWebhook(r *http.Request) error {
 	}
 	log.Printf("[webhook] Payload validated successfully")
 
+	// Remember we got this one, so the reconciliation poller doesn't mistake it
+	// for a delivery that never arrived and replay it. Do this before
+	// processing rather than after: if processing fails we want GitHub's
+	// delivery to be marked failed and retried by hand, not silently re-run
+	// from under us five minutes later.
+	s.deliveries.add(guid)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return s.processWebhook(ctx, eventType, payload)
+}
+
+// processWebhook handles one webhook payload, whichever way it reached us: a
+// POST to /webhook, or the deliveries poller rescuing one that got lost.
+//
+// It returns an error only for failures worth retrying (GitHub API trouble,
+// mostly). A payload we simply can't make sense of is logged and dropped.
+func (s *Service) processWebhook(ctx context.Context, eventType string, payload []byte) error {
 	installationID, err := parseEventInstallationID(payload)
 	if err != nil {
 		log.Printf("[webhook] could not get installation id from webhook: err=%s\n", err)
@@ -458,7 +475,7 @@ func (s *Service) handleWebhook(r *http.Request) error {
 		return err
 	}
 
-	ee, err := github.ParseWebHook(github.WebHookType(r), payload)
+	ee, err := github.ParseWebHook(eventType, payload)
 	if err != nil {
 		log.Printf("[webhook] could not parse webhook: err=%s\n", err)
 		return nil

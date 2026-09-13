@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -62,6 +63,11 @@ type Service struct {
 	queue      *Queue
 	cgroup     CgroupManager
 	refreshes  refreshCache
+
+	// bootTime bounds how far back the webhook deliveries poller will reach:
+	// we don't replay events from before this process existed.
+	bootTime   time.Time
+	deliveries *seenDeliveries
 }
 
 func main() {
@@ -122,6 +128,8 @@ func main() {
 		containerd: cntd,
 		queue:      queue,
 		cgroup:     cgroup,
+		bootTime:   time.Now(),
+		deliveries: newSeenDeliveries(),
 	}
 
 	s.cleanupStale()
@@ -135,6 +143,7 @@ func main() {
 	}
 
 	go s.cacheGCRun()
+	go s.deliveryPollRun()
 
 	s.serverRun()
 }
