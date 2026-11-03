@@ -132,21 +132,6 @@ func (j *Job) DedupKey() string {
 	return key
 }
 
-func (s *Service) setStatus(ctx context.Context, gh *github.Client, j *Job, state string, description string) error {
-	url := fmt.Sprintf("%s/jobs/%s", s.config.ExternalURL, j.ID)
-	_, _, err := gh.Repositories.CreateStatus(ctx,
-		*j.Repo.Owner.Login,
-		*j.Repo.Name,
-		j.SHA,
-		github.RepoStatus{
-			State:       github.Ptr(state),
-			Context:     github.Ptr(fmt.Sprintf("ci/%s", j.Name)),
-			Description: github.Ptr(description),
-			TargetURL:   &url,
-		})
-	return err
-}
-
 // postCancelStatuses reports a terminal GitHub status for jobs that were
 // canceled while still queued. A running job reports its own status when the
 // canceled context unwinds runJob, but a queued one never started, so without
@@ -158,10 +143,7 @@ func (s *Service) postCancelStatuses(jobs []*Job, reason string) {
 			log.Printf("error creating github client for cancel status: %v", err)
 			continue
 		}
-		err = s.setStatus(context.Background(), gh, job, "failure", fmt.Sprintf("Canceled: %s", reason))
-		if err != nil {
-			log.Printf("error setting cancel status for job %s: %v", job.ID, err)
-		}
+		s.setStatus(gh, job, "failure", fmt.Sprintf("Canceled: %s", reason))
 	}
 }
 
@@ -189,10 +171,7 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	err = s.setStatus(ctx, gh, job, "pending", "Job is running...")
-	if err != nil {
-		log.Printf("error creating pending status: %v", err)
-	}
+	s.setStatus(gh, job, "pending", "Job is running...")
 
 	err = nopanic(func() error {
 		return s.runJobInner(jobCtx, job, gh, logs)
@@ -221,10 +200,7 @@ func (s *Service) runJob(ctx context.Context, job *Job) {
 
 	fmt.Fprintf(logs, "job %s in %s\n", result, duration)
 
-	err = s.setStatus(ctx, gh, job, result, description)
-	if err != nil {
-		log.Printf("error creating result status: %v", err)
-	}
+	s.setStatus(gh, job, result, description)
 }
 
 func (s *Service) runJobInner(ctx context.Context, job *Job, gh *github.Client, logs *os.File) error {

@@ -63,6 +63,7 @@ type Service struct {
 	queue      *Queue
 	cgroup     CgroupManager
 	refreshes  refreshCache
+	statuses   statusSender
 
 	// bootTime bounds how far back the webhook deliveries poller will reach:
 	// we don't replay events from before this process existed.

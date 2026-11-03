@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"math"
@@ -67,10 +66,7 @@ func (q *Queue) enqueueJobs(jobs []*Job, s *Service) {
 		if err != nil {
 			log.Printf("error creating github client for status update: %v", err)
 		} else {
-			err = s.setStatus(context.Background(), gh, job, "pending", "Job enqueued")
-			if err != nil {
-				log.Printf("error setting enqueued status: %v", err)
-			}
+			s.setStatus(gh, job, "pending", "Job enqueued")
 		}
 	}
 
