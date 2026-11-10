@@ -64,6 +64,7 @@ type Service struct {
 	cgroup     CgroupManager
 	refreshes  refreshCache
 	statuses   statusSender
+	dns        *dnsResolver
 
 	// bootTime bounds how far back the webhook deliveries poller will reach:
 	// we don't replay events from before this process existed.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -56,23 +57,23 @@ func (s *Service) handleDNSQuery(m *dns.Msg) {
 				return
 			}
 
-			ips, err := net.LookupHost(q.Name)
+			ips, ttl, err := s.dns.lookupA(q.Name)
 			if err != nil {
-				log.Printf("Failed to lookup host: %v\n", err)
-				m.Rcode = dns.RcodeServerFailure
+				log.Printf("Failed to lookup host %s: %v\n", q.Name, err)
+				var rcodeErr *dnsRcodeError
+				if errors.As(err, &rcodeErr) && rcodeErr.rcode == dns.RcodeNameError {
+					m.Rcode = dns.RcodeNameError
+				} else {
+					m.Rcode = dns.RcodeServerFailure
+				}
 				return
 			}
 
 			for _, ip := range ips {
-				tryExec("nft", "add", "element", "inet", "bender", "allow", "{", ip, "}")
-
-				rr, err := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, ip))
-				if err != nil {
-					log.Printf("Failed to create RR: %v\n", err)
-					// ignore
-				} else {
-					m.Answer = append(m.Answer, rr)
-				}
+				m.Answer = append(m.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttl},
+					A:   net.ParseIP(ip),
+				})
 			}
 		}
 	}
@@ -96,13 +97,21 @@ func (s *Service) netRun() {
 
 	s.setupNftables()
 
+	resolver, err := newDNSResolver("/etc/resolv.conf", func(ips []string) {
+		tryExec("nft", "add", "element", "inet", "bender", "allow", "{", strings.Join(ips, ", "), "}")
+	})
+	if err != nil {
+		log.Fatalf("Failed to setup DNS resolver: %v", err)
+	}
+	s.dns = resolver
+
 	// attach request handler func
 	dns.HandleFunc(".", s.handleDNSRequest)
 
 	// start DNS server
 	server := &dns.Server{Addr: "127.0.0.93:53", Net: "udp"}
 	log.Printf("Starting DNS server at %s", server.Addr)
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	defer server.Shutdown()
 	if err != nil {
 		log.Fatalf("Failed to start DNS server: %s\n ", err.Error())
