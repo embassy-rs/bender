@@ -416,6 +416,14 @@ detachedHead = false
 	if err != nil {
 		return err
 	}
+	// Deferred before the container/task teardown, so it runs after them
+	// (defers are LIFO) once the cgroup is empty. runc may already have removed
+	// it on task delete; that's fine.
+	defer func() {
+		if err := jobCGroup.Remove(); err != nil && !os.IsNotExist(err) {
+			log.Printf("cleanup: failed to remove cgroup for job %s: %v", job.ID, err)
+		}
+	}()
 
 	// Set a per-job memory limit with no swap. This is what makes
 	// memory.oom.group actually do its job: memory.oom.group only triggers a
