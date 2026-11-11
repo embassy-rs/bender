@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -536,6 +537,11 @@ detachedHead = false
 
 	status := <-statusC
 
+	if peak := s.memoryPeak(jobCGroup); peak != "" {
+		fmt.Fprintf(logs, "job memory peak: %s\n", peak)
+		log.Printf("job %s memory peak: %s", job.ID, peak)
+	}
+
 	// Commit cache
 	primary := job.Cache[0]
 	log.Printf("committing cache to primary %s", primary)
@@ -580,9 +586,58 @@ detachedHead = false
 		return err
 	}
 	if status.ExitCode() != 0 {
+		if msg := s.oomMessage(jobCGroup); msg != "" {
+			return errors.New(msg)
+		}
 		return errors.Errorf("exited with code %d", status.ExitCode())
 	}
 	return nil
+}
+
+// memoryPeak formats the job's peak RAM and swap use against its limits, e.g.
+// "9.1 GiB of 12G, swap 0.3 GiB of 2G". Returns "" if it can't be read.
+func (s *Service) memoryPeak(cg *Cgroup) string {
+	gib := func(file string) (string, bool) {
+		v, err := cg.GetValue(file)
+		if err != nil {
+			log.Printf("failed to read %s of %s: %v", file, cg, err)
+			return "", false
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return "", false
+		}
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30)), true
+	}
+	mem, ok := gib("memory.peak")
+	if !ok {
+		return ""
+	}
+	res := fmt.Sprintf("%s of %s", mem, s.config.MemoryMax)
+	if swap, ok := gib("memory.swap.peak"); ok {
+		res += fmt.Sprintf(", swap %s of %s", swap, s.config.MemorySwapMax)
+	}
+	return res
+}
+
+// oomMessage explains why the job was killed for lack of memory, or returns ""
+// if it wasn't. It ends up in the GitHub status, which is truncated at 140
+// chars, after "Failed in <duration>: ".
+func (s *Service) oomMessage(cg *Cgroup) string {
+	kind, err := cg.OOMKill()
+	if err != nil {
+		log.Printf("failed to read OOM state of %s: %v", cg, err)
+		return ""
+	}
+	switch kind {
+	case OOMLimit:
+		return fmt.Sprintf("killed: out of memory, job exceeded its %s memory limit", s.config.MemoryMax)
+	case OOMShared:
+		return "killed: CI server ran out of memory (shared by all jobs), not necessarily this job's fault; retry"
+	case OOMD:
+		return "killed by systemd-oomd: CI server memory pressure (shared by all jobs); retry"
+	}
+	return ""
 }
 
 func (s *Service) postComment(ctx context.Context, job *Job, gh *github.Client, home string) error {

@@ -5,7 +5,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type CgroupManager struct {
@@ -62,6 +65,50 @@ func (cg *Cgroup) Exists() bool {
 // Remove removes the cgroup directory
 func (cg *Cgroup) Remove() error {
 	return os.Remove(cg.Path)
+}
+
+type OOMKill int
+
+const (
+	OOMNone OOMKill = iota
+	// The kernel killed it because the cgroup hit its own memory.max.
+	OOMLimit
+	// The kernel killed it because an ancestor (e.g. bender.service) or the
+	// whole host ran out of memory. The victim is the biggest process, which
+	// isn't necessarily in the job using the most memory.
+	OOMShared
+	// systemd-oomd killed it because of memory or swap pressure.
+	OOMD
+)
+
+// OOMKill reports whether processes in the cgroup were killed for lack of
+// memory, and by whom. It must be called before the cgroup is removed.
+func (cg *Cgroup) OOMKill() (OOMKill, error) {
+	// systemd-oomd marks the cgroups it kills with this xattr, set before the kill.
+	if _, err := unix.Getxattr(cg.Path, "user.oomd_ooms", nil); err == nil {
+		return OOMD, nil
+	}
+
+	events, err := cg.GetValue("memory.events")
+	if err != nil {
+		return OOMNone, err
+	}
+	counts := map[string]int64{}
+	for _, line := range strings.Split(events, "\n") {
+		if k, v, ok := strings.Cut(line, " "); ok {
+			counts[k], _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
+	switch {
+	case counts["oom_kill"] == 0:
+		return OOMNone, nil
+	// "oom" counts this cgroup hitting its own limit. A shared OOM is accounted
+	// to the ancestor that hit its limit, not to us.
+	case counts["oom"] > 0:
+		return OOMLimit, nil
+	default:
+		return OOMShared, nil
+	}
 }
 
 // String returns the cgroup path
