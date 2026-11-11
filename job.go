@@ -458,7 +458,7 @@ detachedHead = false
 				"HOME=/ci",
 				"GITHUB_TOKEN=" + token,
 			}),
-			oci.WithCgroup(jobCGroup.Path),
+			oci.WithCgroup(jobCGroup.CgroupsPath),
 			oci.WithHostNamespace(specs.NetworkNamespace), // TODO network sandboxing
 			oci.WithMounts(mounts),
 			oci.WithCapabilities(nil),

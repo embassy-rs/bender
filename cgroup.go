@@ -18,6 +18,11 @@ type CgroupManager struct {
 // Cgroup represents a cgroup and provides methods to interact with it
 type Cgroup struct {
 	Path string // Absolute path to the cgroup directory
+	// Path relative to the cgroup2 mountpoint (e.g. "/system.slice/bender.service/jobs/job-x").
+	// This is what the OCI spec's cgroupsPath expects: runc resolves it against
+	// the mountpoint, so passing Path there would create a stray, unlimited
+	// /sys/fs/cgroup/sys/fs/cgroup/... cgroup outside bender.service.
+	CgroupsPath string
 }
 
 // NewCGroup creates a new CGroup instance
@@ -142,8 +147,9 @@ func initCgroup() CgroupManager {
 
 // CreateJobCgroup creates a new cgroup for a job and returns a Cgroup instance
 func (cgm *CgroupManager) CreateJobCgroup(jobID string) (*Cgroup, error) {
-	jobCgroupPath := filepath.Join(cgm.mountpoint, cgm.jobs, fmt.Sprintf("job-%s", jobID))
-	jobCgroup := NewCGroup(jobCgroupPath)
+	cgroupsPath := filepath.Join(cgm.jobs, fmt.Sprintf("job-%s", jobID))
+	jobCgroup := NewCGroup(filepath.Join(cgm.mountpoint, cgroupsPath))
+	jobCgroup.CgroupsPath = cgroupsPath
 
 	err := jobCgroup.Create()
 	if err != nil {
